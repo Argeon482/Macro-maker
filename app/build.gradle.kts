@@ -65,7 +65,18 @@ android {
     buildConfig = true
     aidl = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all { testTask ->
+        val repoUrl = providers.environmentVariable("ROBOLECTRIC_REPO_URL").orNull
+        if (!repoUrl.isNullOrBlank()) {
+          testTask.systemProperty("robolectric.dependency.repo.url", repoUrl)
+          testTask.systemProperty("robolectric.dependency.repo.id", "maven-central-mirror")
+        }
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
