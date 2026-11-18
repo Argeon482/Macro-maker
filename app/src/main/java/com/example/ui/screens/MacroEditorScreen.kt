@@ -82,6 +82,7 @@ import com.example.model.SetVariableStep
 import com.example.model.StopStep
 import com.example.model.SwipeStep
 import com.example.model.TapStep
+import com.example.model.TouchGuardPolicy
 import com.example.service.PickerMode
 import com.example.ui.theme.AmberLogic
 import com.example.ui.theme.ElectricCyan
@@ -446,6 +447,7 @@ private fun MacroSettingsDialog(
     var loopCount by remember(macro) { mutableStateOf(macro.loopCount.toString()) }
     var pollingMs by remember(macro) { mutableStateOf(macro.pollingIntervalMs.toString()) }
     var injectionMode by remember(macro) { mutableStateOf(macro.injectionMode) }
+    var touchGuardPolicy by remember(macro) { mutableStateOf(macro.touchGuardPolicy) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -498,6 +500,21 @@ private fun MacroSettingsDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary
                 )
+                Text("User Touch Guard", style = MaterialTheme.typography.labelMedium, color = AmberLogic)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TouchGuardPolicy.entries.forEach { policy ->
+                        FilterChip(
+                            selected = touchGuardPolicy == policy,
+                            onClick = { touchGuardPolicy = policy },
+                            label = { Text(policy.displayLabel) }
+                        )
+                    }
+                }
+                Text(
+                    text = touchGuardPolicy.shortDesc,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
             }
         },
         confirmButton = {
@@ -509,7 +526,8 @@ private fun MacroSettingsDialog(
                             targetAppLabel = target.trim().ifBlank { "Any Screen" },
                             loopCount = loopCount.toIntOrNull() ?: macro.loopCount,
                             pollingIntervalMs = (pollingMs.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L),
-                            injectionMode = injectionMode
+                            injectionMode = injectionMode,
+                            touchGuardPolicy = touchGuardPolicy
                         )
                     )
                 },

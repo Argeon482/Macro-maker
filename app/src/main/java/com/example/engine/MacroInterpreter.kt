@@ -19,8 +19,10 @@ import com.example.model.SetVariableStep
 import com.example.model.StopStep
 import com.example.model.SwipeStep
 import com.example.model.TapStep
+import com.example.model.TouchGuardPolicy
 import com.example.model.VarComparator
 import com.example.model.VarOperation
+import com.example.service.OverlayCoordinator
 import com.example.shizuku.ShizukuConnectionState
 import com.example.shizuku.ShizukuInputBridge
 import com.example.vision.ScreenDetector
@@ -68,7 +70,8 @@ private data class LoopFrame(
 class MacroInterpreter(
     private val repository: MacroRepository,
     private val shizukuBridge: ShizukuInputBridge,
-    private val screenDetector: ScreenDetector
+    private val screenDetector: ScreenDetector,
+    private val overlayCoordinator: OverlayCoordinator = OverlayCoordinator()
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var executionJob: Job? = null
@@ -207,6 +210,7 @@ class MacroInterpreter(
 
                     when (step) {
                         is TapStep -> {
+                            waitForTouchGuard(macro.touchGuardPolicy)
                             val ok = shizukuBridge.tap(step.x, step.y, step.holdMs, step.jitterPx, macro.injectionMode)
                             val msg = if (ok) {
                                 "Tap (${step.x.toInt()}, ${step.y.toInt()}) [${macro.injectionMode.displayLabel}]"
@@ -222,6 +226,7 @@ class MacroInterpreter(
                         }
 
                         is SwipeStep -> {
+                            waitForTouchGuard(macro.touchGuardPolicy)
                             val ok = shizukuBridge.swipe(
                                 step.startX,
                                 step.startY,
@@ -351,6 +356,7 @@ class MacroInterpreter(
                                         LogLevel.SUCCESS
                                     )
                                     if (step.tapOnMatch) {
+                                        waitForTouchGuard(macro.touchGuardPolicy)
                                         shizukuBridge.tap(step.x.toFloat(), step.y.toFloat(), mode = macro.injectionMode)
                                     }
                                     pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
@@ -391,6 +397,7 @@ class MacroInterpreter(
                                         LogLevel.SUCCESS
                                     )
                                     if (step.tapOnMatch) {
+                                        waitForTouchGuard(macro.touchGuardPolicy)
                                         shizukuBridge.tap(result.centerX.toFloat(), result.centerY.toFloat(), mode = macro.injectionMode)
                                     }
                                     pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
@@ -467,6 +474,20 @@ class MacroInterpreter(
     private suspend fun waitIfPaused() {
         while (_state.value.status == ExecutionStatus.PAUSED) {
             delay(80L)
+        }
+    }
+
+    private suspend fun waitForTouchGuard(policy: TouchGuardPolicy) {
+        if (policy == TouchGuardPolicy.OFF || policy.cooldownMs <= 0L) return
+        val maxWaitMs = policy.cooldownMs * 2L
+        var waitedMs = 0L
+        while (scope.isActive && waitedMs < maxWaitMs) {
+            val elapsedSinceTouch = overlayCoordinator.msSinceLastUserTouch()
+            if (elapsedSinceTouch >= policy.cooldownMs) return
+            updateTelemetry("Touch Guard yielding (${policy.displayLabel})...")
+            val stepMs = 45L
+            delay(stepMs)
+            waitedMs += stepMs
         }
     }
 

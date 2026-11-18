@@ -14,6 +14,8 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -71,6 +73,8 @@ class MacroOverlayService : Service() {
     private var passThroughParams: WindowManager.LayoutParams? = null
     private var passThroughLifecycle: OverlayLifecycleOwner? = null
 
+    private var touchWatcherView: View? = null
+
     override fun onCreate() {
         super.onCreate()
         app = application as ShizuMacroApp
@@ -116,6 +120,7 @@ class MacroOverlayService : Service() {
                 app.screenDetector.stop()
                 app.overlayCoordinator.cancelPicker()
                 app.overlayCoordinator.setOverlayShowing(false)
+                removeTouchWatcherOverlay()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -149,6 +154,7 @@ class MacroOverlayService : Service() {
                     app.overlayCoordinator.setLoadedMacro(macroId, macroName)
                 }
                 showDockOverlay()
+                showTouchWatcherOverlay()
                 app.overlayCoordinator.setOverlayShowing(true, macroId, macroName)
             }
         }
@@ -156,6 +162,7 @@ class MacroOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        removeTouchWatcherOverlay()
         removePassThroughOverlay()
         removePickerOverlay()
         removeStudioOverlay()
@@ -666,6 +673,38 @@ class MacroOverlayService : Service() {
         passThroughView = null
         passThroughParams = null
         passThroughLifecycle = null
+    }
+
+    private fun showTouchWatcherOverlay() {
+        if (touchWatcherView != null) return
+        val params = WindowManager.LayoutParams(
+            1,
+            1,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+        val watcher = View(this).apply {
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                    app.overlayCoordinator.recordUserTouchActivity()
+                }
+                false
+            }
+        }
+        touchWatcherView = watcher
+        runCatching { windowManager.addView(watcher, params) }
+    }
+
+    private fun removeTouchWatcherOverlay() {
+        touchWatcherView?.let { v -> runCatching { windowManager.removeView(v) } }
+        touchWatcherView = null
     }
 
     private suspend fun resolveActiveMacro(): MacroDefinition? {

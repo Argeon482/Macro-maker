@@ -39,9 +39,18 @@ enum class SystemKeyAction(val keyCode: Int, val displayLabel: String) {
 
 @Serializable
 enum class InputInjectionMode(val displayLabel: String, val shortDesc: String) {
-    MOUSE("Mouse", "Separate pointer stream (avoids finger collision)"),
+    MOUSE("Mouse", "Mouse pointer click (ACTION_DOWN/UP)"),
+    MOUSE_HOVER_CLICK("Hover Click", "No-DOWN generic button click (tests TouchState bypass)"),
+    CO_TOUCH_MULTIPLEX("Co-Touch", "Injects Pointer 1 alongside live Finger Slot 0 on physical device"),
     STYLUS("Stylus", "Separate pen stream (Android 13+ / pen apps)"),
     TOUCHSCREEN("Touch", "Standard finger touch stream")
+}
+
+@Serializable
+enum class TouchGuardPolicy(val displayLabel: String, val cooldownMs: Long, val shortDesc: String) {
+    OFF("Off", 0L, "Inject immediately without waiting for finger activity"),
+    YIELD_350MS("Yield 350ms", 350L, "Pause macro taps briefly when external user touch starts"),
+    YIELD_800MS("Yield 800ms", 800L, "Yield longer (800ms) during active manual touch bursts")
 }
 
 @Serializable
@@ -206,6 +215,7 @@ data class MacroDefinition(
     val loopCount: Int = 1,
     val pollingIntervalMs: Long = 250L,
     val injectionMode: InputInjectionMode = InputInjectionMode.MOUSE,
+    val touchGuardPolicy: TouchGuardPolicy = TouchGuardPolicy.OFF,
     val steps: List<MacroStep> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()

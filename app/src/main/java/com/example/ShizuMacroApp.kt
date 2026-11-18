@@ -29,8 +29,8 @@ class ShizuMacroApp : Application() {
         repository = MacroRepository(this, database.macroDao())
         shizukuBridge = ShizukuInputBridge(this)
         screenDetector = ScreenDetector(this)
-        interpreter = MacroInterpreter(repository, shizukuBridge, screenDetector)
         overlayCoordinator = OverlayCoordinator()
+        interpreter = MacroInterpreter(repository, shizukuBridge, screenDetector, overlayCoordinator)
 
         shizukuBridge.registerListeners()
     }

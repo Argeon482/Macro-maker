@@ -117,6 +117,7 @@ private fun ShizuMacroRoot(
     val templates by viewModel.templates.collectAsState()
     val logs by viewModel.recentLogs.collectAsState()
     val shizukuStatus by viewModel.shizukuStatus.collectAsState()
+    val hardwareDiagnostics by viewModel.hardwareDiagnostics.collectAsState()
     val hasOverlay by viewModel.hasOverlayPermission.collectAsState()
     val captureActive by viewModel.screenCaptureActive.collectAsState()
     val executionState by viewModel.executionState.collectAsState()
@@ -383,6 +384,11 @@ private fun ShizuMacroRoot(
                         composable<AppRoute.TouchSandbox> {
                             TouchSandboxScreen(
                                 shizukuStatus = shizukuStatus,
+                                hardwareDiagnostics = hardwareDiagnostics,
+                                onRefreshCapabilities = { viewModel.refreshHardwareCapabilities() },
+                                onCooperativeFingerUpdate = { down, x, y, downTime, devId ->
+                                    viewModel.updateCooperativeFingerState(down, x, y, downTime, devId)
+                                },
                                 onTestTap = { x, y, mode -> viewModel.testShizukuTapInSandbox(x, y, mode) },
                                 onTestSwipe = { sx, sy, ex, ey, mode -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey, mode) }
                             )

@@ -95,6 +95,18 @@ class OverlayCoordinator {
     private val _pickerResults = MutableSharedFlow<PickerResult>(extraBufferCapacity = 8)
     val pickerResults: SharedFlow<PickerResult> = _pickerResults.asSharedFlow()
 
+    @Volatile
+    private var lastExternalUserTouchMs: Long = 0L
+
+    fun recordUserTouchActivity(timestampMs: Long = System.currentTimeMillis()) {
+        lastExternalUserTouchMs = timestampMs
+    }
+
+    fun msSinceLastUserTouch(nowMs: Long = System.currentTimeMillis()): Long {
+        val last = lastExternalUserTouchMs
+        return if (last <= 0L) Long.MAX_VALUE else (nowMs - last).coerceAtLeast(0L)
+    }
+
     fun setOverlayShowing(showing: Boolean, macroId: String? = null, macroName: String? = null) {
         _overlayState.update {
             it.copy(

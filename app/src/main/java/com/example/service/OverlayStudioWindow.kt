@@ -99,6 +99,7 @@ import com.example.model.StopStep
 import com.example.model.SwipeStep
 import com.example.model.SystemKeyAction
 import com.example.model.TapStep
+import com.example.model.TouchGuardPolicy
 import com.example.model.VarComparator
 import com.example.model.VarOperation
 import com.example.vision.ScreenDetector
@@ -691,6 +692,7 @@ private fun OverlayMacroSettings(
     var loops by remember(macro) { mutableStateOf(macro.loopCount.toString()) }
     var poll by remember(macro) { mutableStateOf(macro.pollingIntervalMs.toString()) }
     var injectionMode by remember(macro) { mutableStateOf(macro.injectionMode) }
+    var touchGuardPolicy by remember(macro) { mutableStateOf(macro.touchGuardPolicy) }
 
     Column(
         modifier = Modifier
@@ -716,6 +718,18 @@ private fun OverlayMacroSettings(
         }
         Text(injectionMode.shortDesc, color = StudioMuted, fontSize = 11.sp)
 
+        Text("User Touch Guard", color = StudioAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TouchGuardPolicy.entries.forEach { policy ->
+                FilterChip(
+                    selected = touchGuardPolicy == policy,
+                    onClick = { touchGuardPolicy = policy },
+                    label = { Text(policy.displayLabel, fontSize = 12.sp) }
+                )
+            }
+        }
+        Text(touchGuardPolicy.shortDesc, color = StudioMuted, fontSize = 11.sp)
+
         Button(
             onClick = {
                 onSave(
@@ -724,7 +738,8 @@ private fun OverlayMacroSettings(
                         targetAppLabel = target.trim().ifBlank { macro.targetAppLabel },
                         loopCount = loops.toIntOrNull() ?: macro.loopCount,
                         pollingIntervalMs = (poll.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L),
-                        injectionMode = injectionMode
+                        injectionMode = injectionMode,
+                        touchGuardPolicy = touchGuardPolicy
                     )
                 )
             },

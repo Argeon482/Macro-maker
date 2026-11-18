@@ -10,6 +10,7 @@ import com.example.model.InputInjectionMode
 import com.example.model.MacroDefinition
 import com.example.model.MacroExportBundle
 import com.example.model.MacroStep
+import com.example.model.TouchGuardPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -221,6 +222,9 @@ class MacroRepository(
         val resolvedMode = runCatching {
             InputInjectionMode.valueOf(injectionMode)
         }.getOrDefault(InputInjectionMode.MOUSE)
+        val resolvedGuard = runCatching {
+            TouchGuardPolicy.valueOf(touchGuardPolicy)
+        }.getOrDefault(TouchGuardPolicy.OFF)
         return MacroDefinition(
             id = id,
             name = name,
@@ -229,6 +233,7 @@ class MacroRepository(
             loopCount = loopCount,
             pollingIntervalMs = pollingIntervalMs,
             injectionMode = resolvedMode,
+            touchGuardPolicy = resolvedGuard,
             steps = decodedSteps,
             createdAt = createdAt,
             updatedAt = updatedAt
@@ -244,6 +249,7 @@ class MacroRepository(
             loopCount = loopCount,
             pollingIntervalMs = pollingIntervalMs,
             injectionMode = injectionMode.name,
+            touchGuardPolicy = touchGuardPolicy.name,
             stepsJson = json.encodeToString(steps),
             createdAt = createdAt,
             updatedAt = updatedAt

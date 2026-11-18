@@ -32,6 +32,7 @@ import com.example.service.OverlayUiState
 import com.example.service.PickerMode
 import com.example.service.PickerRequest
 import com.example.service.PickerResult
+import com.example.shizuku.HardwareInputDiagnostics
 import com.example.shizuku.ShizukuStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -69,6 +70,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val shizukuStatus: StateFlow<ShizukuStatus> = shizukuBridge.status
+    val hardwareDiagnostics: StateFlow<HardwareInputDiagnostics> = shizukuBridge.diagnostics
     val screenCaptureActive: StateFlow<Boolean> = screenDetector.isActive
     val executionState: StateFlow<RuntimeExecutionState> = interpreter.state
     val overlayState: StateFlow<OverlayUiState> = overlayCoordinator.overlayState
@@ -92,7 +94,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         shizukuBridge.refreshStatus()
         if (shizukuBridge.hasPermission()) {
             shizukuBridge.bindService()
+            shizukuBridge.refreshCapabilities()
         }
+    }
+
+    fun refreshHardwareCapabilities() {
+        shizukuBridge.refreshCapabilities()
+    }
+
+    fun updateCooperativeFingerState(
+        isDown: Boolean,
+        screenX: Float,
+        screenY: Float,
+        downTime: Long,
+        deviceId: Int
+    ) {
+        shizukuBridge.updateCooperativeFingerState(isDown, screenX, screenY, downTime, deviceId)
     }
 
     fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(app)

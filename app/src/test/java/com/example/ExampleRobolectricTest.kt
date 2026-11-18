@@ -20,6 +20,7 @@ import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
 import com.example.model.SetVariableStep
+import com.example.model.TouchGuardPolicy
 import com.example.model.VarComparator
 import com.example.model.VarOperation
 import com.example.service.OverlayCoordinator
@@ -119,7 +120,8 @@ class ExampleRobolectricTest {
         val repo = MacroRepository(context, db.macroDao())
         val bridge = ShizukuInputBridge(context)
         val detector = ScreenDetector(context)
-        val interpreter = MacroInterpreter(repo, bridge, detector)
+        val coordinator = OverlayCoordinator()
+        val interpreter = MacroInterpreter(repo, bridge, detector, coordinator)
 
         val loopId = "l1"
         val macro = MacroDefinition(
@@ -231,12 +233,14 @@ class ExampleRobolectricTest {
         val stylusMacro = MacroDefinition(
             id = "stylus-1",
             name = "Game Stylus Flow",
-            injectionMode = InputInjectionMode.STYLUS
+            injectionMode = InputInjectionMode.CO_TOUCH_MULTIPLEX,
+            touchGuardPolicy = TouchGuardPolicy.YIELD_350MS
         )
         repo.saveMacro(stylusMacro)
 
         val loaded = repo.getMacro("stylus-1")!!
-        assertEquals(InputInjectionMode.STYLUS, loaded.injectionMode)
+        assertEquals(InputInjectionMode.CO_TOUCH_MULTIPLEX, loaded.injectionMode)
+        assertEquals(TouchGuardPolicy.YIELD_350MS, loaded.touchGuardPolicy)
 
         val legacyBundleJson = """
             {
@@ -255,6 +259,29 @@ class ExampleRobolectricTest {
         assertEquals(1, count)
         val importedLegacy = repo.macros.first().first { it.name == "Legacy Flow" }
         assertEquals(InputInjectionMode.MOUSE, importedLegacy.injectionMode)
+        assertEquals(TouchGuardPolicy.OFF, importedLegacy.touchGuardPolicy)
         db.close()
+    }
+
+    @Test
+    fun bridgeDiagnosticsAndTouchGuard_trackCooperativeFingerAndOutsideTouch() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val bridge = ShizukuInputBridge(context)
+        bridge.updateCooperativeFingerState(
+            isDown = true,
+            screenX = 240f,
+            screenY = 1600f,
+            downTime = 12345L,
+            deviceId = 4
+        )
+        val diag = bridge.diagnostics.value
+        assertTrue(diag.cooperativeFingerDown)
+        assertEquals(4, diag.physicalTouchDeviceId)
+        assertEquals(240f, diag.cooperativeFingerX, 0.01f)
+
+        val coordinator = OverlayCoordinator()
+        assertTrue(coordinator.msSinceLastUserTouch(5000L) > 10_000L)
+        coordinator.recordUserTouchActivity(4900L)
+        assertEquals(100L, coordinator.msSinceLastUserTouch(5000L))
     }
 }
