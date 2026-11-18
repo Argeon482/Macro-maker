@@ -1,0 +1,347 @@
+package com.example.ui
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.ShizuMacroApp
+import com.example.data.ExecutionLogEntity
+import com.example.data.LogLevel
+import com.example.data.TemplateAssetEntity
+import com.example.engine.RuntimeExecutionState
+import com.example.model.BranchAction
+import com.example.model.DelayStep
+import com.example.model.IfColorStep
+import com.example.model.IfImageStep
+import com.example.model.IfVariableStep
+import com.example.model.LoopEndStep
+import com.example.model.LoopStartStep
+import com.example.model.MacroDefinition
+import com.example.model.MacroStep
+import com.example.model.SetVariableStep
+import com.example.model.SwipeStep
+import com.example.model.TapStep
+import com.example.model.VarComparator
+import com.example.model.VarOperation
+import com.example.service.MacroOverlayService
+import com.example.service.OverlayUiState
+import com.example.service.PickerMode
+import com.example.service.PickerRequest
+import com.example.service.PickerResult
+import com.example.shizuku.ShizukuStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.UUID
+
+sealed interface UiNotice {
+    data class Message(val text: String, val isError: Boolean = false) : UiNotice
+}
+
+class StudioViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val app = application as ShizuMacroApp
+    private val repository = app.repository
+    val shizukuBridge = app.shizukuBridge
+    val screenDetector = app.screenDetector
+    val interpreter = app.interpreter
+    val overlayCoordinator = app.overlayCoordinator
+
+    val macros: StateFlow<List<MacroDefinition>> = repository.macros
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val templates: StateFlow<List<TemplateAssetEntity>> = repository.templates
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val recentLogs: StateFlow<List<ExecutionLogEntity>> = repository.recentLogs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val shizukuStatus: StateFlow<ShizukuStatus> = shizukuBridge.status
+    val screenCaptureActive: StateFlow<Boolean> = screenDetector.isActive
+    val executionState: StateFlow<RuntimeExecutionState> = interpreter.state
+    val overlayState: StateFlow<OverlayUiState> = overlayCoordinator.overlayState
+
+    private val _hasOverlayPermission = MutableStateFlow(canDrawOverlays())
+    val hasOverlayPermission: StateFlow<Boolean> = _hasOverlayPermission.asStateFlow()
+
+    private val _notices = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
+    val notices: SharedFlow<UiNotice> = _notices.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            overlayCoordinator.pickerResults.collect { result ->
+                applyPickerResult(result)
+            }
+        }
+    }
+
+    fun refreshDiagnostics() {
+        _hasOverlayPermission.value = canDrawOverlays()
+        shizukuBridge.refreshStatus()
+        if (shizukuBridge.hasPermission()) {
+            shizukuBridge.bindService()
+        }
+    }
+
+    fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(app)
+
+    fun createNewMacro(name: String, targetApp: String, onCreated: (String) -> Unit) {
+        viewModelScope.launch {
+            val cleanName = name.trim().ifBlank { "Untitled Macro" }
+            val macro = MacroDefinition(
+                id = UUID.randomUUID().toString(),
+                name = cleanName,
+                targetAppLabel = targetApp.trim().ifBlank { "Any Screen" },
+                steps = listOf(
+                    TapStep(label = "Initial Tap", x = 540f, y = 960f),
+                    DelayStep(label = "Cooldown", minMs = 450L, maxMs = 650L)
+                )
+            )
+            repository.saveMacro(macro)
+            onCreated(macro.id)
+        }
+    }
+
+    fun createSandboxDemoMacro(onCreated: (String) -> Unit) {
+        viewModelScope.launch {
+            val loopId = UUID.randomUUID().toString()
+            val macro = MacroDefinition(
+                id = UUID.randomUUID().toString(),
+                name = "Sandbox Loop & Color Flow",
+                description = "Demonstrates variable increments, conditional branching, and non-colliding taps in the Touch Sandbox.",
+                targetAppLabel = "Touch Sandbox",
+                loopCount = 1,
+                pollingIntervalMs = 200L,
+                steps = listOf(
+                    SetVariableStep(label = "Init Counter", variableName = "hits", operation = VarOperation.SET, valueExpression = "0"),
+                    LoopStartStep(id = loopId, label = "Repeat 3x", iterations = 3),
+                    TapStep(label = "Tap Sandbox Target", x = 540f, y = 1050f, holdMs = 45L, jitterPx = 12),
+                    SetVariableStep(label = "Increment Counter", variableName = "hits", operation = VarOperation.INCREMENT, valueExpression = "1"),
+                    DelayStep(label = "Pace Interval", minMs = 350L, maxMs = 500L),
+                    LoopEndStep(label = "End Loop", loopStartId = loopId),
+                    IfVariableStep(
+                        label = "Verify Hit Count",
+                        variableName = "hits",
+                        comparator = VarComparator.GREATER_OR_EQUAL,
+                        compareValue = "3",
+                        thenAction = BranchAction.CONTINUE_NEXT,
+                        elseAction = BranchAction.STOP_MACRO
+                    ),
+                    SwipeStep(label = "Sweep Gesture", startX = 280f, startY = 1250f, endX = 800f, endY = 1250f, durationMs = 280L)
+                )
+            )
+            repository.saveMacro(macro)
+            _notices.tryEmit(UiNotice.Message("Created demo flow '${macro.name}'"))
+            onCreated(macro.id)
+        }
+    }
+
+    fun observeMacro(macroId: String) = repository.observeMacro(macroId)
+
+    fun saveMacro(macro: MacroDefinition) {
+        viewModelScope.launch {
+            repository.saveMacro(macro)
+        }
+    }
+
+    fun duplicateMacro(macroId: String) {
+        viewModelScope.launch {
+            val copy = repository.duplicateMacro(macroId)
+            if (copy != null) {
+                _notices.tryEmit(UiNotice.Message("Duplicated '${copy.name}'"))
+            }
+        }
+    }
+
+    fun deleteMacro(macroId: String) {
+        viewModelScope.launch {
+            if (executionState.value.activeMacroId == macroId) {
+                interpreter.stop()
+            }
+            repository.deleteMacro(macroId)
+            _notices.tryEmit(UiNotice.Message("Macro deleted"))
+        }
+    }
+
+    fun runMacroDirectly(macro: MacroDefinition) {
+        overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+        interpreter.start(macro)
+    }
+
+    fun launchFloatingDock(macro: MacroDefinition) {
+        if (!canDrawOverlays()) {
+            _notices.tryEmit(UiNotice.Message("Grant 'Display over other apps' first.", isError = true))
+            return
+        }
+        overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+        val intent = Intent(app, MacroOverlayService::class.java).apply {
+            action = MacroOverlayService.ACTION_SHOW_DOCK
+            putExtra(MacroOverlayService.EXTRA_MACRO_ID, macro.id)
+            putExtra(MacroOverlayService.EXTRA_MACRO_NAME, macro.name)
+        }
+        startForegroundServiceCompat(intent)
+    }
+
+    fun startMediaProjectionService(resultCode: Int, data: Intent) {
+        val intent = Intent(app, MacroOverlayService::class.java).apply {
+            action = MacroOverlayService.ACTION_START_PROJECTION
+            putExtra(MacroOverlayService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(MacroOverlayService.EXTRA_RESULT_DATA, data)
+        }
+        startForegroundServiceCompat(intent)
+        _notices.tryEmit(UiNotice.Message("Screen detection capture active"))
+    }
+
+    fun stopMediaProjection() {
+        screenDetector.stop()
+        _notices.tryEmit(UiNotice.Message("Screen capture stopped"))
+    }
+
+    fun startScreenPicker(macro: MacroDefinition, step: MacroStep) {
+        if (!canDrawOverlays()) {
+            _notices.tryEmit(UiNotice.Message("Grant 'Display over other apps' to use the visual picker.", isError = true))
+            return
+        }
+        val request = when (step) {
+            is TapStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_TAP, step.x, step.y)
+            is SwipeStep -> PickerRequest(
+                macro.id,
+                step.id,
+                PickerMode.PICK_SWIPE,
+                step.startX,
+                step.startY,
+                step.endX,
+                step.endY
+            )
+            is IfColorStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_COLOR, step.x.toFloat(), step.y.toFloat())
+            is IfImageStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_TEMPLATE_CROP)
+            else -> return
+        }
+        overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+        overlayCoordinator.startPicker(request)
+        val intent = Intent(app, MacroOverlayService::class.java).apply {
+            action = MacroOverlayService.ACTION_START_PICKER
+        }
+        startForegroundServiceCompat(intent)
+    }
+
+    fun testShizukuTapInSandbox(x: Float, y: Float) {
+        viewModelScope.launch {
+            val ok = shizukuBridge.tap(x, y, holdMs = 45L, jitterPx = 0)
+            if (ok) {
+                repository.appendLog("sandbox", "Touch Sandbox", "Shizuku Test", "Injected tap at (${x.toInt()}, ${y.toInt()})", LogLevel.SUCCESS)
+            } else {
+                _notices.tryEmit(UiNotice.Message("Shizuku is not connected. Start Shizuku & grant permission to inject system events.", isError = true))
+            }
+        }
+    }
+
+    fun testShizukuSwipeInSandbox(sx: Float, sy: Float, ex: Float, ey: Float) {
+        viewModelScope.launch {
+            val ok = shizukuBridge.swipe(sx, sy, ex, ey, durationMs = 280L, steps = 16)
+            if (ok) {
+                repository.appendLog("sandbox", "Touch Sandbox", "Shizuku Test", "Injected swipe (${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()})", LogLevel.SUCCESS)
+            } else {
+                _notices.tryEmit(UiNotice.Message("Shizuku is not connected.", isError = true))
+            }
+        }
+    }
+
+    fun exportMacrosToUri(uri: Uri, macroIds: Set<String>? = null) {
+        viewModelScope.launch {
+            runCatching {
+                val payload = repository.exportMacrosToJson(macroIds)
+                withContext(Dispatchers.IO) {
+                    app.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(payload.toByteArray(Charsets.UTF_8))
+                    } ?: error("Unable to open destination file")
+                }
+            }.onSuccess {
+                _notices.tryEmit(UiNotice.Message("Exported macro bundle to JSON"))
+            }.onFailure { err ->
+                _notices.tryEmit(UiNotice.Message("Export failed: ${err.message}", isError = true))
+            }
+        }
+    }
+
+    fun importMacrosFromUri(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                val raw = withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                        ?: error("Unable to read selected JSON file")
+                }
+                repository.importMacrosFromJson(raw).getOrThrow()
+            }.onSuccess { count ->
+                _notices.tryEmit(UiNotice.Message("Imported $count macro(s) from JSON"))
+            }.onFailure { err ->
+                _notices.tryEmit(UiNotice.Message("Invalid macro JSON: ${err.message}", isError = true))
+            }
+        }
+    }
+
+    fun deleteTemplate(id: String) {
+        viewModelScope.launch {
+            repository.deleteTemplate(id)
+        }
+    }
+
+    fun clearLogs() {
+        viewModelScope.launch {
+            repository.clearLogs()
+        }
+    }
+
+    private suspend fun applyPickerResult(result: PickerResult) {
+        if (result.macroId.isBlank() || result.stepId.isBlank()) return
+        val macro = repository.getMacro(result.macroId) ?: return
+        val updatedSteps = macro.steps.map { step ->
+            if (step.id != result.stepId) return@map step
+            when (result) {
+                is PickerResult.TapPicked -> if (step is TapStep) step.copy(x = result.x, y = result.y) else step
+                is PickerResult.SwipePicked -> if (step is SwipeStep) {
+                    step.copy(
+                        startX = result.startX,
+                        startY = result.startY,
+                        endX = result.endX,
+                        endY = result.endY
+                    )
+                } else step
+                is PickerResult.ColorPicked -> if (step is IfColorStep) {
+                    step.copy(x = result.x, y = result.y, targetHexColor = result.hexColor)
+                } else step
+                is PickerResult.TemplatePicked -> if (step is IfImageStep) {
+                    step.copy(
+                        templateId = result.templateId.ifBlank { step.templateId },
+                        templateName = result.templateName,
+                        searchLeft = (result.region.left - 32).coerceAtLeast(0),
+                        searchTop = (result.region.top - 32).coerceAtLeast(0),
+                        searchRight = result.region.right + 32,
+                        searchBottom = result.region.bottom + 32
+                    )
+                } else step
+            }
+        }
+        repository.saveMacro(macro.copy(steps = updatedSteps))
+        _notices.tryEmit(UiNotice.Message("Updated step coordinates from screen picker"))
+    }
+
+    private fun startForegroundServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            app.startForegroundService(intent)
+        } else {
+            app.startService(intent)
+        }
+    }
+}

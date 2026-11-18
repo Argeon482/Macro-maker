@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">ShizuMacro</string>
+    <string name="nav_studio">Studio</string>
+    <string name="nav_sandbox">Sandbox</string>
+    <string name="nav_logs">Console</string>
+    <string name="overlay_service_channel_name">Macro Automation Service</string>
+    <string name="overlay_service_channel_desc">Keeps floating macro controls and screen triggers active.</string>
+    <string name="overlay_notification_title">ShizuMacro Studio Active</string>
+    <string name="overlay_notification_text">Floating automation dock is ready.</string>
+    <string name="action_create_macro">New Macro</string>
+    <string name="action_import_json">Import JSON</string>
+    <string name="action_export_json">Export JSON</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "ShizuMacro",
+  "description": "Shizuku-powered Android touch automation studio with visual branching flows, screen color and image triggers, and floating overlay controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
