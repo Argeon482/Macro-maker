@@ -108,7 +108,7 @@ class ShizukuInputBridge(private val context: Context) {
             .daemon(false)
             .processNameSuffix("shizuku_injector")
             .debuggable(BuildConfig.DEBUG)
-            .version(3)
+            .version(4)
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -291,6 +291,14 @@ class ShizukuInputBridge(private val context: Context) {
                 } else {
                     false
                 }
+                val serviceUid = json.optInt("serviceUid", -1)
+                val appUserId = context.applicationInfo.uid / 100_000
+                val rawNote = json.optString("note", raw)
+                val finalNote = if (appUserId != 0) {
+                    "WARNING: App running in Knox/Work user=$appUserId (Shizuku uid=$serviceUid cannot cross user profiles) • $rawNote"
+                } else {
+                    rawNote
+                }
                 _diagnostics.update {
                     it.copy(
                         physicalTouchDeviceId = json.optInt("touchDeviceId", 0),
@@ -301,7 +309,7 @@ class ShizukuInputBridge(private val context: Context) {
                         uhidWritable = uhidWritable,
                         rootAvailable = json.optBoolean("rootAvailable", false),
                         touchMonitorRunning = monitorStarted || json.optBoolean("touchMonitorRunning", false),
-                        lastBypassReport = json.optString("note", raw)
+                        lastBypassReport = finalNote
                     )
                 }
             }
@@ -469,7 +477,7 @@ class ShizukuInputBridge(private val context: Context) {
         activeDeviceId = 0
 
         val down = obtainPointerEvent(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY, effectiveMode)
-        val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
+        val downOk = injectSafely(service, down, MODE_ASYNC)
         down.recycle()
         if (!downOk) {
             activeDownTime = null
@@ -500,7 +508,7 @@ class ShizukuInputBridge(private val context: Context) {
         }
 
         val up = obtainPointerEvent(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, endX, endY, effectiveMode)
-        val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
+        val upOk = injectSafely(service, up, MODE_ASYNC)
         up.recycle()
         activeDownTime = null
         upOk
@@ -567,11 +575,13 @@ class ShizukuInputBridge(private val context: Context) {
         activeDeviceId = deviceId
 
         val down = obtainPointerEvent(downTime, downTime, MotionEvent.ACTION_DOWN, tx, ty, mode, deviceId = deviceId)
-        val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
+        val downOk = injectSafely(service, down, MODE_ASYNC)
         down.recycle()
 
         if (!downOk) {
             activeDownTime = null
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
+            _diagnostics.update { it.copy(lastBypassReport = "${mode.displayLabel} DOWN blocked: $detail") }
             return false
         }
 
@@ -580,9 +590,19 @@ class ShizukuInputBridge(private val context: Context) {
         }
 
         val up = obtainPointerEvent(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, tx, ty, mode, deviceId = deviceId)
-        val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
+        val upOk = injectSafely(service, up, MODE_ASYNC)
         up.recycle()
         activeDownTime = null
+        val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+        _diagnostics.update {
+            it.copy(
+                lastBypassReport = if (upOk) {
+                    "${mode.displayLabel} (${tx.toInt()}, ${ty.toInt()}) • $detail"
+                } else {
+                    "${mode.displayLabel} UP failed: $detail"
+                }
+            )
+        }
         return upOk
     }
 
@@ -602,7 +622,7 @@ class ShizukuInputBridge(private val context: Context) {
             mode = InputInjectionMode.MOUSE_HOVER_CLICK,
             overrideButtonState = 0
         )
-        val hoverOk = injectSafely(service, hoverEnter, MODE_WAIT_FOR_FINISH)
+        val hoverOk = injectSafely(service, hoverEnter, MODE_ASYNC)
         hoverEnter.recycle()
         if (!hoverOk) {
             val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
@@ -620,7 +640,7 @@ class ShizukuInputBridge(private val context: Context) {
             overrideButtonState = MotionEvent.BUTTON_PRIMARY,
             actionButton = MotionEvent.BUTTON_PRIMARY
         )
-        val pressOk = injectSafely(service, press, MODE_WAIT_FOR_FINISH)
+        val pressOk = injectSafely(service, press, MODE_ASYNC)
         val pressDetail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
         press.recycle()
 
@@ -636,7 +656,7 @@ class ShizukuInputBridge(private val context: Context) {
             overrideButtonState = 0,
             actionButton = MotionEvent.BUTTON_PRIMARY
         )
-        val releaseOk = injectSafely(service, release, MODE_WAIT_FOR_FINISH)
+        val releaseOk = injectSafely(service, release, MODE_ASYNC)
         release.recycle()
 
         _diagnostics.update {
@@ -1002,15 +1022,12 @@ class ShizukuInputBridge(private val context: Context) {
             source,
             0
         )
+        event.source = source
         if (actionButton != null) {
-            val setOk = runCatching {
+            runCatching {
                 val method = MotionEvent::class.java.getDeclaredMethod("setActionButton", Int::class.javaPrimitiveType)
                 method.isAccessible = true
                 method.invoke(event, actionButton)
-                true
-            }.getOrDefault(false)
-            if (!setOk) {
-                _diagnostics.update { it.copy(lastBypassReport = "Hidden API blocked MotionEvent.setActionButton") }
             }
         }
         return event

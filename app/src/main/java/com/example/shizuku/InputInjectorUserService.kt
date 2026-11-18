@@ -73,8 +73,27 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
 
     private val trackingIdSeq = AtomicInteger(9000)
 
+    private var isIInputManagerFallback: Boolean = false
+
     init {
+        exemptHiddenApis()
         resolveInputManager()
+    }
+
+    @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
+    private fun exemptHiddenApis() {
+        runCatching {
+            val vmRuntimeClass = Class.forName("dalvik.system.VMRuntime")
+            val getRuntime = vmRuntimeClass.getDeclaredMethod("getRuntime")
+            getRuntime.isAccessible = true
+            val runtime = getRuntime.invoke(null)
+            val setExemptions = vmRuntimeClass.getDeclaredMethod(
+                "setHiddenApiExemptions",
+                Array<String>::class.java
+            )
+            setExemptions.isAccessible = true
+            setExemptions.invoke(runtime, arrayOf("L"))
+        }
     }
 
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
@@ -91,9 +110,37 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
                 Int::class.javaPrimitiveType
             )
             injectInputEventMethod?.isAccessible = true
+            isIInputManagerFallback = false
         } catch (t: Throwable) {
-            lastInjectDiagnostic = "Reflect error: ${t.javaClass.simpleName}: ${t.message}"
-            Log.e(TAG, "Failed to reflect InputManager.injectInputEvent", t)
+            Log.w(TAG, "InputManager.getInstance failed, trying IInputManager binder", t)
+            resolveViaServiceManager(t)
+        }
+    }
+
+    @SuppressLint("PrivateApi")
+    private fun resolveViaServiceManager(primaryError: Throwable) {
+        try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val getService = smClass.getDeclaredMethod("getService", String::class.java)
+            getService.isAccessible = true
+            val binder = getService.invoke(null, "input") as? android.os.IBinder
+                ?: error("ServiceManager.getService(\"input\") returned null")
+            val stubClass = Class.forName("android.hardware.input.IInputManager\$Stub")
+            val asInterface = stubClass.getDeclaredMethod("asInterface", android.os.IBinder::class.java)
+            asInterface.isAccessible = true
+            val iim = asInterface.invoke(null, binder) ?: error("IInputManager.Stub.asInterface returned null")
+            val method = iim.javaClass.getDeclaredMethod(
+                "injectInputEvent",
+                InputEvent::class.java,
+                Int::class.javaPrimitiveType
+            )
+            method.isAccessible = true
+            inputManagerInstance = iim
+            injectInputEventMethod = method
+            isIInputManagerFallback = true
+        } catch (fallbackErr: Throwable) {
+            lastInjectDiagnostic = "Reflect error: ${primaryError.javaClass.simpleName}; binder: ${fallbackErr.message}"
+            Log.e(TAG, "Failed to resolve InputManager & IInputManager", fallbackErr)
         }
     }
 
@@ -109,6 +156,9 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         val method = injectInputEventMethod ?: return false
         return try {
             if (event is MotionEvent) {
+                if (event.source == InputDevice.SOURCE_UNKNOWN) {
+                    event.source = InputDevice.SOURCE_TOUCHSCREEN
+                }
                 val masked = event.actionMasked
                 if ((masked == MotionEvent.ACTION_BUTTON_PRESS || masked == MotionEvent.ACTION_BUTTON_RELEASE) &&
                     event.actionButton == 0
@@ -121,10 +171,11 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
                 }
             }
             val ok = (method.invoke(im, event, mode) as? Boolean) ?: false
+            val uid = android.os.Process.myUid()
             lastInjectDiagnostic = if (event is MotionEvent) {
-                "ok=$ok act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
+                "ok=$ok uid=$uid act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
             } else {
-                "ok=$ok key"
+                "ok=$ok uid=$uid key"
             }
             ok
         } catch (t: Throwable) {
@@ -184,7 +235,12 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
             else -> "/dev/input & /dev/uhid SELinux-blocked"
         }
 
+        val serviceUid = android.os.Process.myUid()
+        val imPath = if (isIInputManagerFallback) "IInputManager" else "InputManager"
+
         return JSONObject().apply {
+            put("serviceUid", serviceUid)
+            put("imBackend", imPath)
             put("touchDeviceId", touchId)
             put("touchDeviceName", touchName)
             put("devInputReadable", devInputReadable)
@@ -193,7 +249,7 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
             put("uhidWritable", uhidWritable)
             put("rootAvailable", rootAvailable)
             put("touchMonitorRunning", monitorRunning.get())
-            put("note", "$touchName (id=$touchId) • $accessSummary")
+            put("note", "uid=$serviceUid ($imPath) • $touchName (id=$touchId) • $accessSummary")
         }.toString()
     }
 
