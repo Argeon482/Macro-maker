@@ -42,6 +42,9 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
     @Volatile
     private var cachedTouchMaxY: Float = 2400f
 
+    @Volatile
+    private var lastInjectDiagnostic: String = "No events injected yet"
+
     init {
         resolveInputManager()
     }
@@ -61,26 +64,40 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
             )
             injectInputEventMethod?.isAccessible = true
         } catch (t: Throwable) {
+            lastInjectDiagnostic = "Reflect error: ${t.javaClass.simpleName}: ${t.message}"
             Log.e(TAG, "Failed to reflect InputManager.injectInputEvent", t)
         }
     }
 
     override fun injectInputEvent(event: InputEvent?, mode: Int): Boolean {
-        if (event == null) return false
+        if (event == null) {
+            lastInjectDiagnostic = "null event"
+            return false
+        }
         val im = inputManagerInstance ?: run {
             resolveInputManager()
             inputManagerInstance
         } ?: return false
         val method = injectInputEventMethod ?: return false
         return try {
-            (method.invoke(im, event, mode) as? Boolean) ?: false
+            val ok = (method.invoke(im, event, mode) as? Boolean) ?: false
+            lastInjectDiagnostic = if (event is MotionEvent) {
+                "ok=$ok act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
+            } else {
+                "ok=$ok key"
+            }
+            ok
         } catch (t: Throwable) {
-            Log.e(TAG, "injectInputEvent failed", t)
+            val cause = t.cause ?: t
+            lastInjectDiagnostic = "${cause.javaClass.simpleName}: ${cause.message}"
+            Log.e(TAG, "injectInputEvent failed: $lastInjectDiagnostic", t)
             false
         }
     }
 
     override fun ping(): Boolean = inputManagerInstance != null && injectInputEventMethod != null
+
+    override fun getLastInjectDiagnostic(): String = lastInjectDiagnostic
 
     override fun probeCapabilities(): String {
         val touchDevice = findPrimaryTouchDevice()

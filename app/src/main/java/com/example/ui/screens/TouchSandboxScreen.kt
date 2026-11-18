@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Context
+import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.foundation.BorderStroke
@@ -60,6 +61,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
@@ -92,10 +96,302 @@ private data class SandboxTouchDot(
     val isInjectedTool: Boolean
 )
 
-private class RawSandboxSurfaceView(
+/**
+ * Pure multi-pointer router shared by the unified Arena AndroidView and unit tests.
+ * Routes every active pointer ID independently across Joystick and Target zones so
+ * ACTION_POINTER_DOWN (Pointer 1 in Target) never drops even when Pointer 0 holds Joystick.
+ */
+internal class SandboxMultiPointerRouter(
+    private val onJoystickState: (
+        isDragging: Boolean,
+        puckOffset: Offset,
+        incrementMoves: Boolean,
+        incrementCancel: Boolean,
+        deviceId: Int,
+        summary: String
+    ) -> Unit,
+    private val onCooperativeFingerUpdate: (
+        isDown: Boolean,
+        screenX: Float,
+        screenY: Float,
+        downTime: Long,
+        deviceId: Int,
+        pointerId: Int
+    ) -> Unit,
+    private val onTargetEvent: (
+        localX: Float,
+        localY: Float,
+        toolLabel: String,
+        isInjected: Boolean,
+        countHit: Boolean,
+        summaryOverride: String?
+    ) -> Unit
+) {
+    var activeJoystickPointerId: Int? = null
+        private set
+    private var lastHoverButtonPressTime: Long = -1L
+
+    fun reset() {
+        activeJoystickPointerId = null
+        lastHoverButtonPressTime = -1L
+    }
+
+    fun handleTouchEvent(
+        event: MotionEvent,
+        arenaWinX: Float,
+        arenaWinY: Float,
+        arenaScreenX: Float,
+        arenaScreenY: Float,
+        joystickRectInWin: RectF,
+        targetRectInWin: RectF,
+        selectedModeLabel: String
+    ): Boolean {
+        val action = event.actionMasked
+        val idx = event.actionIndex
+
+        when (action) {
+            MotionEvent.ACTION_DOWN -> {
+                val pid = event.getPointerId(0)
+                val wx = arenaWinX + event.getX(0)
+                val wy = arenaWinY + event.getY(0)
+                val sx = arenaScreenX + event.getX(0)
+                val sy = arenaScreenY + event.getY(0)
+                val rawTool = event.getToolType(0)
+                val tool = toolName(rawTool)
+
+                if (joystickRectInWin.contains(wx, wy)) {
+                    activeJoystickPointerId = pid
+                    val puck = clampJoystickOffset(wx, wy, joystickRectInWin)
+                    onJoystickState(
+                        true,
+                        puck,
+                        false,
+                        false,
+                        event.deviceId,
+                        "Joystick DOWN ($tool P$pid dev=${event.deviceId})"
+                    )
+                    onCooperativeFingerUpdate(true, sx, sy, event.downTime, event.deviceId, pid)
+                } else if (targetRectInWin.contains(wx, wy)) {
+                    val isInjected = rawTool != MotionEvent.TOOL_TYPE_FINGER
+                    onTargetEvent(
+                        wx - targetRectInWin.left,
+                        wy - targetRectInWin.top,
+                        tool,
+                        isInjected,
+                        true,
+                        null
+                    )
+                }
+            }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                val pid = event.getPointerId(idx)
+                val wx = arenaWinX + event.getX(idx)
+                val wy = arenaWinY + event.getY(idx)
+                val sx = arenaScreenX + event.getX(idx)
+                val sy = arenaScreenY + event.getY(idx)
+                val rawTool = event.getToolType(idx)
+                val tool = toolName(rawTool)
+
+                if (targetRectInWin.contains(wx, wy) || (activeJoystickPointerId != null && !joystickRectInWin.contains(wx, wy))) {
+                    val localX = (wx - targetRectInWin.left).coerceIn(0f, targetRectInWin.width().coerceAtLeast(1f))
+                    val localY = (wy - targetRectInWin.top).coerceIn(0f, targetRectInWin.height().coerceAtLeast(1f))
+                    onTargetEvent(
+                        localX,
+                        localY,
+                        "$tool(P$pid)",
+                        true,
+                        true,
+                        null
+                    )
+                } else if (activeJoystickPointerId == null && joystickRectInWin.contains(wx, wy)) {
+                    activeJoystickPointerId = pid
+                    val puck = clampJoystickOffset(wx, wy, joystickRectInWin)
+                    onJoystickState(
+                        true,
+                        puck,
+                        false,
+                        false,
+                        event.deviceId,
+                        "Joystick DOWN ($tool P$pid dev=${event.deviceId})"
+                    )
+                    onCooperativeFingerUpdate(true, sx, sy, event.downTime, event.deviceId, pid)
+                }
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                for (i in 0 until event.pointerCount) {
+                    val pid = event.getPointerId(i)
+                    val wx = arenaWinX + event.getX(i)
+                    val wy = arenaWinY + event.getY(i)
+                    val sx = arenaScreenX + event.getX(i)
+                    val sy = arenaScreenY + event.getY(i)
+                    val rawTool = event.getToolType(i)
+                    val tool = toolName(rawTool)
+
+                    if (pid == activeJoystickPointerId) {
+                        val puck = clampJoystickOffset(wx, wy, joystickRectInWin)
+                        onJoystickState(
+                            true,
+                            puck,
+                            true,
+                            false,
+                            event.deviceId,
+                            "Dragging dev=${event.deviceId} (${puck.x.toInt()}, ${puck.y.toInt()})"
+                        )
+                        onCooperativeFingerUpdate(true, sx, sy, event.downTime, event.deviceId, pid)
+                    } else if (targetRectInWin.contains(wx, wy)) {
+                        val isInjected = rawTool != MotionEvent.TOOL_TYPE_FINGER || event.pointerCount > 1
+                        onTargetEvent(
+                            wx - targetRectInWin.left,
+                            wy - targetRectInWin.top,
+                            if (event.pointerCount > 1) "$tool(P$pid)" else tool,
+                            isInjected,
+                            false,
+                            null
+                        )
+                    }
+                }
+            }
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                val pid = event.getPointerId(idx)
+                val wx = arenaWinX + event.getX(idx)
+                val wy = arenaWinY + event.getY(idx)
+                val tool = toolName(event.getToolType(idx))
+                if (pid == activeJoystickPointerId) {
+                    activeJoystickPointerId = null
+                    onJoystickState(false, Offset.Zero, false, false, event.deviceId, "Joystick released (P$pid)")
+                    onCooperativeFingerUpdate(false, 0f, 0f, 0L, event.deviceId, pid)
+                } else if (targetRectInWin.contains(wx, wy) || activeJoystickPointerId != null) {
+                    val localX = (wx - targetRectInWin.left).coerceIn(0f, targetRectInWin.width().coerceAtLeast(1f))
+                    val localY = (wy - targetRectInWin.top).coerceIn(0f, targetRectInWin.height().coerceAtLeast(1f))
+                    onTargetEvent(localX, localY, "$tool(P$pid)", true, false, "Pointer $pid lifted ($tool)")
+                }
+            }
+
+            MotionEvent.ACTION_UP -> {
+                val pid = event.getPointerId(0)
+                val wx = arenaWinX + event.getX(0)
+                val wy = arenaWinY + event.getY(0)
+                val tool = toolName(event.getToolType(0))
+                if (pid == activeJoystickPointerId) {
+                    activeJoystickPointerId = null
+                    onJoystickState(false, Offset.Zero, false, false, event.deviceId, "Joystick released cleanly")
+                    onCooperativeFingerUpdate(false, 0f, 0f, 0L, event.deviceId, pid)
+                } else if (targetRectInWin.contains(wx, wy)) {
+                    onTargetEvent(
+                        wx - targetRectInWin.left,
+                        wy - targetRectInWin.top,
+                        tool,
+                        true,
+                        false,
+                        "$tool UP (${(wx - targetRectInWin.left).toInt()}, ${(wy - targetRectInWin.top).toInt()})"
+                    )
+                }
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                val wasDragging = activeJoystickPointerId != null
+                activeJoystickPointerId = null
+                if (wasDragging) {
+                    onJoystickState(
+                        false,
+                        Offset.Zero,
+                        false,
+                        true,
+                        event.deviceId,
+                        "ACTION_CANCEL ($selectedModeLabel, dev=${event.deviceId})"
+                    )
+                    onCooperativeFingerUpdate(false, 0f, 0f, 0L, event.deviceId, 0)
+                }
+            }
+        }
+        return true
+    }
+
+    fun handleGenericMotion(
+        event: MotionEvent,
+        arenaWinX: Float,
+        arenaWinY: Float,
+        targetRectInWin: RectF
+    ): Boolean {
+        val action = event.actionMasked
+        val idx = event.actionIndex
+        val wx = arenaWinX + event.getX(idx)
+        val wy = arenaWinY + event.getY(idx)
+        if (!targetRectInWin.contains(wx, wy)) return false
+
+        val localX = wx - targetRectInWin.left
+        val localY = wy - targetRectInWin.top
+        val tool = toolName(event.getToolType(idx))
+        return when (action) {
+            MotionEvent.ACTION_BUTTON_PRESS -> {
+                if (event.eventTime != lastHoverButtonPressTime) {
+                    lastHoverButtonPressTime = event.eventTime
+                    onTargetEvent(localX, localY, "${tool}_BTN", true, true, null)
+                }
+                true
+            }
+            MotionEvent.ACTION_HOVER_MOVE -> {
+                onTargetEvent(localX, localY, "${tool}_HVR", true, false, null)
+                true
+            }
+            MotionEvent.ACTION_BUTTON_RELEASE -> {
+                onTargetEvent(localX, localY, "${tool}_BTN", true, false, "${tool}_BTN UP")
+                true
+            }
+            else -> false
+        }
+    }
+
+    fun handleComposeHoverOrButton(
+        type: PointerEventType,
+        pointerType: PointerType,
+        winPos: Offset,
+        uptimeMs: Long,
+        targetRectInWin: RectF
+    ) {
+        if (pointerType != PointerType.Mouse) return
+        if (!targetRectInWin.contains(winPos.x, winPos.y)) return
+        val localX = winPos.x - targetRectInWin.left
+        val localY = winPos.y - targetRectInWin.top
+        when (type) {
+            PointerEventType.Press -> {
+                if (uptimeMs != lastHoverButtonPressTime) {
+                    lastHoverButtonPressTime = uptimeMs
+                    onTargetEvent(localX, localY, "MOUSE_BTN", true, true, null)
+                }
+            }
+            PointerEventType.Move -> {
+                onTargetEvent(localX, localY, "MOUSE_HVR", true, false, null)
+            }
+            PointerEventType.Release -> {
+                onTargetEvent(localX, localY, "MOUSE_BTN", true, false, "MOUSE_BTN UP")
+            }
+            else -> Unit
+        }
+    }
+
+    private fun clampJoystickOffset(wx: Float, wy: Float, rect: RectF): Offset {
+        val cx = rect.centerX()
+        val cy = rect.centerY()
+        val maxR = (minOf(rect.width(), rect.height()) / 2f - 34f).coerceAtLeast(30f)
+        val dx = wx - cx
+        val dy = wy - cy
+        val dist = hypot(dx, dy)
+        return if (dist > maxR && dist > 0f) {
+            Offset(dx / dist * maxR, dy / dist * maxR)
+        } else {
+            Offset(dx, dy)
+        }
+    }
+}
+
+private class RawSandboxArenaView(
     context: Context,
-    var onTouchCallback: (MotionEvent) -> Boolean = { true },
-    var onGenericCallback: (MotionEvent) -> Boolean = { false }
+    var onTouchCallback: (view: View, event: MotionEvent) -> Boolean = { _, _ -> true },
+    var onGenericCallback: (view: View, event: MotionEvent) -> Boolean = { _, _ -> false }
 ) : View(context) {
     init {
         isClickable = true
@@ -104,11 +400,11 @@ private class RawSandboxSurfaceView(
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         parent?.requestDisallowInterceptTouchEvent(true)
-        return onTouchCallback(event)
+        return onTouchCallback(this, event)
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        return onGenericCallback(event)
+        return onGenericCallback(this, event)
     }
 }
 
@@ -118,7 +414,7 @@ fun TouchSandboxScreen(
     shizukuStatus: ShizukuStatus,
     hardwareDiagnostics: HardwareInputDiagnostics,
     onRefreshCapabilities: () -> Unit,
-    onCooperativeFingerUpdate: (isDown: Boolean, screenX: Float, screenY: Float, downTime: Long, deviceId: Int) -> Unit,
+    onCooperativeFingerUpdate: (isDown: Boolean, screenX: Float, screenY: Float, downTime: Long, deviceId: Int, pointerId: Int) -> Unit,
     onTestTap: (x: Float, y: Float, mode: InputInjectionMode) -> Unit,
     onTestSwipe: (sx: Float, sy: Float, ex: Float, ey: Float, mode: InputInjectionMode) -> Unit,
     modifier: Modifier = Modifier
@@ -139,69 +435,30 @@ fun TouchSandboxScreen(
     var lastReceivedTool by remember { mutableStateOf("NONE") }
     var lastTargetSummary by remember { mutableStateOf("Waiting for injected tap or hover click") }
 
+    var joystickWindowRect by remember { mutableStateOf(RectF()) }
+    var targetWindowRect by remember { mutableStateOf(RectF()) }
     var padScreenOrigin by remember { mutableStateOf(Offset.Zero) }
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     var targetScreenCenter by remember { mutableStateOf(Offset.Zero) }
     var targetRadiusPx by remember { mutableIntStateOf(64) }
-    var joystickSize by remember { mutableStateOf(IntSize.Zero) }
     val recentDots = remember { mutableStateListOf<SandboxTouchDot>() }
     val hostView = LocalView.current
 
-    fun handleJoystickTouch(event: MotionEvent): Boolean {
-        val action = event.actionMasked
-        val idx = event.actionIndex
-        val tool = event.getToolType(idx)
-        val cx = joystickSize.width / 2f
-        val cy = joystickSize.height / 2f
-        val maxR = (minOf(cx, cy) - 34f).coerceAtLeast(30f)
-        val dx = event.x - cx
-        val dy = event.y - cy
-        val dist = hypot(dx, dy)
-        val clamped = if (dist > maxR && dist > 0f) {
-            Offset(dx / dist * maxR, dy / dist * maxR)
-        } else {
-            Offset(dx, dy)
-        }
-
-        if (event.deviceId > 0) {
-            fingerDeviceId = event.deviceId
-        }
-
-        when (action) {
-            MotionEvent.ACTION_DOWN -> {
-                isFingerDragging = true
-                fingerPuckOffset = clamped
-                lastFingerSummary = "Joystick DOWN (${toolName(tool)} dev=${event.deviceId})"
-                onCooperativeFingerUpdate(true, event.rawX, event.rawY, event.downTime, event.deviceId)
-            }
-            MotionEvent.ACTION_MOVE -> {
-                isFingerDragging = true
-                fingerPuckOffset = clamped
-                dragMoveSamples++
-                lastFingerSummary = "Dragging dev=${event.deviceId} (${clamped.x.toInt()}, ${clamped.y.toInt()})"
-                onCooperativeFingerUpdate(true, event.rawX, event.rawY, event.downTime, event.deviceId)
-            }
-            MotionEvent.ACTION_UP -> {
-                isFingerDragging = false
-                fingerPuckOffset = Offset.Zero
-                lastFingerSummary = "Joystick released cleanly"
-                onCooperativeFingerUpdate(false, 0f, 0f, 0L, event.deviceId)
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                isFingerDragging = false
-                fingerPuckOffset = Offset.Zero
-                collisionCancelCount++
-                lastFingerSummary = "ACTION_CANCEL (${selectedMode.displayLabel}, dev=${event.deviceId})"
-                onCooperativeFingerUpdate(false, 0f, 0f, 0L, event.deviceId)
-            }
-        }
-        return true
-    }
-
-    fun recordHitOrDot(x: Float, y: Float, toolLabel: String, isInjected: Boolean, countHit: Boolean) {
+    fun recordHitOrDot(
+        x: Float,
+        y: Float,
+        toolLabel: String,
+        isInjected: Boolean,
+        countHit: Boolean,
+        summaryOverride: String?
+    ) {
         lastReceivedTool = toolLabel
         recentDots.add(SandboxTouchDot(x, y, isInjected))
         if (recentDots.size > 28) recentDots.removeAt(0)
+        if (summaryOverride != null) {
+            lastTargetSummary = summaryOverride
+            return
+        }
         if (countHit) {
             val cx = padSize.width / 2f
             val cy = padSize.height / 2f
@@ -217,52 +474,21 @@ fun TouchSandboxScreen(
         }
     }
 
-    fun handlePadTouch(event: MotionEvent): Boolean {
-        val action = event.actionMasked
-        val idx = event.actionIndex
-        val rawTool = event.getToolType(idx)
-        val tool = toolName(rawTool)
-        val isInjected = rawTool != MotionEvent.TOOL_TYPE_FINGER || event.pointerCount > 1
-        val px = event.getX(idx)
-        val py = event.getY(idx)
-        when (action) {
-            MotionEvent.ACTION_DOWN -> {
-                recordHitOrDot(px, py, tool, isInjected, countHit = true)
+    val arenaRouter = remember {
+        SandboxMultiPointerRouter(
+            onJoystickState = { dragging, puck, incMoves, incCancel, devId, summary ->
+                isFingerDragging = dragging
+                fingerPuckOffset = puck
+                if (incMoves) dragMoveSamples++
+                if (incCancel) collisionCancelCount++
+                if (devId > 0) fingerDeviceId = devId
+                lastFingerSummary = summary
+            },
+            onCooperativeFingerUpdate = onCooperativeFingerUpdate,
+            onTargetEvent = { lx, ly, tool, isInjected, countHit, overrideSummary ->
+                recordHitOrDot(lx, ly, tool, isInjected, countHit, overrideSummary)
             }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                recordHitOrDot(px, py, "$tool(P$idx)", isInjected = true, countHit = true)
-            }
-            MotionEvent.ACTION_MOVE -> {
-                recordHitOrDot(px, py, tool, isInjected, countHit = false)
-            }
-            MotionEvent.ACTION_POINTER_UP -> {
-                lastTargetSummary = "Pointer $idx lifted ($tool)"
-            }
-            MotionEvent.ACTION_UP -> {
-                lastTargetSummary = "$tool UP (${px.toInt()}, ${py.toInt()})"
-            }
-        }
-        return true
-    }
-
-    fun handlePadGenericMotion(event: MotionEvent): Boolean {
-        val action = event.actionMasked
-        val tool = toolName(event.getToolType(event.actionIndex))
-        when (action) {
-            MotionEvent.ACTION_BUTTON_PRESS -> {
-                recordHitOrDot(event.x, event.y, "${tool}_BTN", isInjected = true, countHit = true)
-                return true
-            }
-            MotionEvent.ACTION_HOVER_MOVE -> {
-                recordHitOrDot(event.x, event.y, "${tool}_HVR", isInjected = true, countHit = false)
-                return true
-            }
-            MotionEvent.ACTION_BUTTON_RELEASE -> {
-                lastTargetSummary = "${tool}_BTN UP"
-                return true
-            }
-        }
-        return false
+        )
     }
 
     LaunchedEffect(Unit) {
@@ -299,6 +525,7 @@ fun TouchSandboxScreen(
                     }
                     IconButton(
                         onClick = {
+                            arenaRouter.reset()
                             targetHits = 0
                             dragMoveSamples = 0
                             collisionCancelCount = 0
@@ -364,7 +591,7 @@ fun TouchSandboxScreen(
                             text = if (hardwareDiagnostics.devInputReadable) {
                                 "evdev: READABLE (${hardwareDiagnostics.physicalTouchDeviceName})"
                             } else {
-                                "evdev: SELinux-blocked • Hover Click & Co-Touch ready"
+                                "evdev: SELinux-blocked • Co-Touch Slot${hardwareDiagnostics.cooperativeFingerPointerId} & Hover ready"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (hardwareDiagnostics.devInputReadable) EmeraldRun else AmberLogic,
@@ -412,18 +639,35 @@ fun TouchSandboxScreen(
                         Text(
                             text = hardwareDiagnostics.lastBypassReport,
                             style = MaterialTheme.typography.labelSmall,
-                            color = ElectricCyan.copy(alpha = 0.85f),
-                            maxLines = 1,
+                            color = if (hardwareDiagnostics.lastBypassReport.contains("blocked", ignoreCase = true) ||
+                                hardwareDiagnostics.lastBypassReport.contains("failed", ignoreCase = true)
+                            ) RoseAlert else ElectricCyan.copy(alpha = 0.9f),
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                // Dual Stress-Test Arena: Joystick + Target/Swipe Pad
+                // Dual Stress-Test Arena wrapped by a SINGLE unified multi-touch RawSandboxArenaView
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val pe = awaitPointerEvent()
+                                    val first = pe.changes.firstOrNull() ?: continue
+                                    arenaRouter.handleComposeHoverOrButton(
+                                        type = pe.type,
+                                        pointerType = first.type,
+                                        winPos = first.position,
+                                        uptimeMs = first.uptimeMillis,
+                                        targetRectInWin = targetWindowRect
+                                    )
+                                }
+                            }
+                        }
                 ) {
                     val sideBySide = maxWidth >= 540.dp
                     if (sideBySide) {
@@ -434,8 +678,7 @@ fun TouchSandboxScreen(
                             JoystickDragZone(
                                 isFingerDragging = isFingerDragging,
                                 puckOffset = fingerPuckOffset,
-                                onSizeChanged = { joystickSize = it },
-                                onFingerEvent = ::handleJoystickTouch,
+                                onPositionedInWin = { rect -> joystickWindowRect = rect },
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
@@ -445,6 +688,7 @@ fun TouchSandboxScreen(
                                 targetHits = targetHits,
                                 recentDots = recentDots,
                                 hostView = hostView,
+                                onPositionedInWin = { rect -> targetWindowRect = rect },
                                 onPadPositioned = { origin, size ->
                                     padScreenOrigin = origin
                                     padSize = size
@@ -453,8 +697,6 @@ fun TouchSandboxScreen(
                                     targetScreenCenter = center
                                     targetRadiusPx = radiusPx
                                 },
-                                onPadTouchEvent = ::handlePadTouch,
-                                onPadGenericMotionEvent = ::handlePadGenericMotion,
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
@@ -469,6 +711,7 @@ fun TouchSandboxScreen(
                                 targetHits = targetHits,
                                 recentDots = recentDots,
                                 hostView = hostView,
+                                onPositionedInWin = { rect -> targetWindowRect = rect },
                                 onPadPositioned = { origin, size ->
                                     padScreenOrigin = origin
                                     padSize = size
@@ -477,8 +720,6 @@ fun TouchSandboxScreen(
                                     targetScreenCenter = center
                                     targetRadiusPx = radiusPx
                                 },
-                                onPadTouchEvent = ::handlePadTouch,
-                                onPadGenericMotionEvent = ::handlePadGenericMotion,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
@@ -487,14 +728,58 @@ fun TouchSandboxScreen(
                             JoystickDragZone(
                                 isFingerDragging = isFingerDragging,
                                 puckOffset = fingerPuckOffset,
-                                onSizeChanged = { joystickSize = it },
-                                onFingerEvent = ::handleJoystickTouch,
+                                onPositionedInWin = { rect -> joystickWindowRect = rect },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(0.95f)
                             )
                         }
                     }
+
+                    // Unified Arena receiver: handles Pointer 0 (Joystick) + Pointer 1+ (Target) together
+                    val onArenaTouch: (View, MotionEvent) -> Boolean = { view, event ->
+                        val winLoc = IntArray(2)
+                        val screenLoc = IntArray(2)
+                        view.getLocationInWindow(winLoc)
+                        view.getLocationOnScreen(screenLoc)
+                        arenaRouter.handleTouchEvent(
+                            event = event,
+                            arenaWinX = winLoc[0].toFloat(),
+                            arenaWinY = winLoc[1].toFloat(),
+                            arenaScreenX = screenLoc[0].toFloat(),
+                            arenaScreenY = screenLoc[1].toFloat(),
+                            joystickRectInWin = joystickWindowRect,
+                            targetRectInWin = targetWindowRect,
+                            selectedModeLabel = selectedMode.displayLabel
+                        )
+                    }
+                    val onArenaGeneric: (View, MotionEvent) -> Boolean = { view, event ->
+                        val winLoc = IntArray(2)
+                        view.getLocationInWindow(winLoc)
+                        arenaRouter.handleGenericMotion(
+                            event = event,
+                            arenaWinX = winLoc[0].toFloat(),
+                            arenaWinY = winLoc[1].toFloat(),
+                            targetRectInWin = targetWindowRect
+                        )
+                    }
+
+                    AndroidView(
+                        factory = { ctx ->
+                            RawSandboxArenaView(
+                                ctx,
+                                onTouchCallback = onArenaTouch,
+                                onGenericCallback = onArenaGeneric
+                            )
+                        },
+                        update = { view ->
+                            view.onTouchCallback = onArenaTouch
+                            view.onGenericCallback = onArenaGeneric
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("sandbox_unified_arena")
+                    )
                 }
 
                 // Trigger Buttons Row
@@ -577,8 +862,7 @@ fun TouchSandboxScreen(
 private fun JoystickDragZone(
     isFingerDragging: Boolean,
     puckOffset: Offset,
-    onSizeChanged: (IntSize) -> Unit,
-    onFingerEvent: (MotionEvent) -> Boolean,
+    onPositionedInWin: (RectF) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -590,7 +874,17 @@ private fun JoystickDragZone(
                 color = if (isFingerDragging) EmeraldRun else HairlineBorder,
                 shape = RoundedCornerShape(18.dp)
             )
-            .onGloballyPositioned { coords -> onSizeChanged(coords.size) }
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInWindow()
+                onPositionedInWin(
+                    RectF(
+                        pos.x,
+                        pos.y,
+                        pos.x + coords.size.width.toFloat(),
+                        pos.y + coords.size.height.toFloat()
+                    )
+                )
+            }
             .testTag("sandbox_joystick_pad"),
         contentAlignment = Alignment.Center
     ) {
@@ -630,16 +924,6 @@ private fun JoystickDragZone(
                 .align(Alignment.TopCenter)
                 .padding(top = 10.dp)
         )
-
-        AndroidView(
-            factory = { ctx ->
-                RawSandboxSurfaceView(ctx, onTouchCallback = onFingerEvent)
-            },
-            update = { view ->
-                view.onTouchCallback = onFingerEvent
-            },
-            modifier = Modifier.fillMaxSize()
-        )
     }
 }
 
@@ -648,10 +932,9 @@ private fun TargetAndSwipePad(
     targetHits: Int,
     recentDots: List<SandboxTouchDot>,
     hostView: View,
+    onPositionedInWin: (RectF) -> Unit,
     onPadPositioned: (origin: Offset, size: IntSize) -> Unit,
     onTargetPositioned: (center: Offset, radiusPx: Int) -> Unit,
-    onPadTouchEvent: (MotionEvent) -> Boolean,
-    onPadGenericMotionEvent: (MotionEvent) -> Boolean,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -663,6 +946,14 @@ private fun TargetAndSwipePad(
                 val winLoc = IntArray(2)
                 hostView.getLocationOnScreen(winLoc)
                 val posInWin = coords.positionInWindow()
+                onPositionedInWin(
+                    RectF(
+                        posInWin.x,
+                        posInWin.y,
+                        posInWin.x + coords.size.width.toFloat(),
+                        posInWin.y + coords.size.height.toFloat()
+                    )
+                )
                 onPadPositioned(
                     Offset(winLoc[0] + posInWin.x, winLoc[1] + posInWin.y),
                     coords.size
@@ -741,21 +1032,6 @@ private fun TargetAndSwipePad(
                 )
             }
         }
-
-        AndroidView(
-            factory = { ctx ->
-                RawSandboxSurfaceView(
-                    ctx,
-                    onTouchCallback = onPadTouchEvent,
-                    onGenericCallback = onPadGenericMotionEvent
-                )
-            },
-            update = { view ->
-                view.onTouchCallback = onPadTouchEvent
-                view.onGenericCallback = onPadGenericMotionEvent
-            },
-            modifier = Modifier.fillMaxSize()
-        )
     }
 }
 

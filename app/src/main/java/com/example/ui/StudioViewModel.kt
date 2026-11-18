@@ -107,9 +107,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         screenX: Float,
         screenY: Float,
         downTime: Long,
-        deviceId: Int
+        deviceId: Int,
+        pointerId: Int = 0
     ) {
-        shizukuBridge.updateCooperativeFingerState(isDown, screenX, screenY, downTime, deviceId)
+        shizukuBridge.updateCooperativeFingerState(isDown, screenX, screenY, downTime, deviceId, pointerId)
     }
 
     fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(app)
@@ -297,7 +298,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     "Injected ${mode.displayLabel} tap at (${x.toInt()}, ${y.toInt()})",
                     LogLevel.SUCCESS
                 )
-            } else {
+            } else if (!shizukuStatus.value.userServiceReady) {
                 _notices.tryEmit(UiNotice.Message("Shizuku is not connected. Start Shizuku & grant permission to inject system events.", isError = true))
             }
         }
@@ -320,7 +321,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     "Injected ${mode.displayLabel} swipe (${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()})",
                     LogLevel.SUCCESS
                 )
-            } else {
+            } else if (!shizukuStatus.value.userServiceReady) {
                 _notices.tryEmit(UiNotice.Message("Shizuku is not connected.", isError = true))
             }
         }

@@ -386,8 +386,8 @@ private fun ShizuMacroRoot(
                                 shizukuStatus = shizukuStatus,
                                 hardwareDiagnostics = hardwareDiagnostics,
                                 onRefreshCapabilities = { viewModel.refreshHardwareCapabilities() },
-                                onCooperativeFingerUpdate = { down, x, y, downTime, devId ->
-                                    viewModel.updateCooperativeFingerState(down, x, y, downTime, devId)
+                                onCooperativeFingerUpdate = { down, x, y, downTime, devId, ptrId ->
+                                    viewModel.updateCooperativeFingerState(down, x, y, downTime, devId, ptrId)
                                 },
                                 onTestTap = { x, y, mode -> viewModel.testShizukuTapInSandbox(x, y, mode) },
                                 onTestSwipe = { sx, sy, ex, ey, mode -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey, mode) }

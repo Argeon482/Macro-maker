@@ -9,5 +9,6 @@ interface IInputInjectorService {
     boolean startTouchMonitor();
     void stopTouchMonitor();
     String readLatestFingerState();
+    String getLastInjectDiagnostic();
     void destroy();
 }

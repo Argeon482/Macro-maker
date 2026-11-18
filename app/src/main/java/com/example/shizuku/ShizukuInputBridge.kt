@@ -54,6 +54,7 @@ data class HardwareInputDiagnostics(
     val cooperativeFingerX: Float = 0f,
     val cooperativeFingerY: Float = 0f,
     val cooperativeFingerDownTime: Long = 0L,
+    val cooperativeFingerPointerId: Int = 0,
     val lastBypassReport: String = "Tap Probe to inspect InputDispatcher & /dev/input"
 )
 
@@ -294,7 +295,8 @@ class ShizukuInputBridge(private val context: Context) {
         screenX: Float,
         screenY: Float,
         downTime: Long,
-        deviceId: Int
+        deviceId: Int,
+        pointerId: Int = 0
     ) {
         _diagnostics.update { cur ->
             cur.copy(
@@ -302,7 +304,8 @@ class ShizukuInputBridge(private val context: Context) {
                 cooperativeFingerDown = isDown,
                 cooperativeFingerX = if (isDown) screenX else cur.cooperativeFingerX,
                 cooperativeFingerY = if (isDown) screenY else cur.cooperativeFingerY,
-                cooperativeFingerDownTime = if (isDown) downTime else 0L
+                cooperativeFingerDownTime = if (isDown) downTime else 0L,
+                cooperativeFingerPointerId = if (isDown) pointerId else 0
             )
         }
     }
@@ -530,7 +533,8 @@ class ShizukuInputBridge(private val context: Context) {
         val hoverOk = injectSafely(service, hoverEnter, MODE_WAIT_FOR_FINISH)
         hoverEnter.recycle()
         if (!hoverOk) {
-            _diagnostics.update { it.copy(lastBypassReport = "Hover Move rejected by InputDispatcher") }
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
+            _diagnostics.update { it.copy(lastBypassReport = "Hover Move failed: $detail") }
             return false
         }
 
@@ -545,6 +549,7 @@ class ShizukuInputBridge(private val context: Context) {
             actionButton = MotionEvent.BUTTON_PRIMARY
         )
         val pressOk = injectSafely(service, press, MODE_WAIT_FOR_FINISH)
+        val pressDetail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
         press.recycle()
 
         if (holdMs > 0) delay(holdMs)
@@ -567,7 +572,7 @@ class ShizukuInputBridge(private val context: Context) {
                 lastBypassReport = if (pressOk && releaseOk) {
                     "Hover Button Click dispatched at (${tx.toInt()}, ${ty.toInt()})"
                 } else {
-                    "Hover Button Click rejected (press=$pressOk, rel=$releaseOk)"
+                    "Hover Button Click failed (press=$pressOk, rel=$releaseOk) • $pressDetail"
                 }
             )
         }
@@ -596,13 +601,16 @@ class ShizukuInputBridge(private val context: Context) {
         }
 
         val pDownAction = MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+        val downEventTime = maxOf(SystemClock.uptimeMillis(), finger.downTime + 1L)
         val pDown = obtainDualTouchEvent(
             downTime = finger.downTime,
-            eventTime = SystemClock.uptimeMillis(),
+            eventTime = downEventTime,
             action = pDownAction,
             deviceId = finger.deviceId,
+            p0Id = finger.pointerId,
             p0x = finger.x,
             p0y = finger.y,
+            p1Id = finger.injectedPointerId,
             p1x = tx,
             p1y = ty
         )
@@ -610,8 +618,9 @@ class ShizukuInputBridge(private val context: Context) {
         pDown.recycle()
 
         if (!downOk) {
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("unknown")
             _diagnostics.update {
-                it.copy(lastBypassReport = "Co-Touch POINTER_DOWN rejected by InputDispatcher on dev=${finger.deviceId}")
+                it.copy(lastBypassReport = "Co-Touch P${finger.injectedPointerId} DOWN blocked: $detail")
             }
             return false
         }
@@ -621,11 +630,13 @@ class ShizukuInputBridge(private val context: Context) {
             val refreshed = resolveActiveFingerSnapshot(service) ?: finger
             val move = obtainDualTouchEvent(
                 downTime = finger.downTime,
-                eventTime = SystemClock.uptimeMillis(),
+                eventTime = maxOf(SystemClock.uptimeMillis(), finger.downTime + 2L),
                 action = MotionEvent.ACTION_MOVE,
                 deviceId = finger.deviceId,
+                p0Id = finger.pointerId,
                 p0x = refreshed.x,
                 p0y = refreshed.y,
+                p1Id = finger.injectedPointerId,
                 p1x = tx,
                 p1y = ty
             )
@@ -637,19 +648,28 @@ class ShizukuInputBridge(private val context: Context) {
         val pUpAction = MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
         val pUp = obtainDualTouchEvent(
             downTime = finger.downTime,
-            eventTime = SystemClock.uptimeMillis(),
+            eventTime = maxOf(SystemClock.uptimeMillis(), finger.downTime + 3L),
             action = pUpAction,
             deviceId = finger.deviceId,
+            p0Id = finger.pointerId,
             p0x = finalFinger.x,
             p0y = finalFinger.y,
+            p1Id = finger.injectedPointerId,
             p1x = tx,
             p1y = ty
         )
         val upOk = injectSafely(service, pUp, MODE_WAIT_FOR_FINISH)
+        val detail = if (!upOk) runCatching { service.lastInjectDiagnostic }.getOrDefault("") else ""
         pUp.recycle()
 
         _diagnostics.update {
-            it.copy(lastBypassReport = "Co-Touch Pointer1 (${tx.toInt()},${ty.toInt()}) + Slot0 dev=${finger.deviceId} -> ok=$upOk")
+            it.copy(
+                lastBypassReport = if (upOk) {
+                    "Co-Touch P${finger.injectedPointerId} (${tx.toInt()},${ty.toInt()}) + Slot${finger.pointerId} dev=${finger.deviceId} -> OK"
+                } else {
+                    "Co-Touch P${finger.injectedPointerId} UP failed: $detail"
+                }
+            )
         }
         return upOk
     }
@@ -667,17 +687,25 @@ class ShizukuInputBridge(private val context: Context) {
         val pDownAction = MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
         val pDown = obtainDualTouchEvent(
             downTime = initialFinger.downTime,
-            eventTime = SystemClock.uptimeMillis(),
+            eventTime = maxOf(SystemClock.uptimeMillis(), initialFinger.downTime + 1L),
             action = pDownAction,
             deviceId = initialFinger.deviceId,
+            p0Id = initialFinger.pointerId,
             p0x = initialFinger.x,
             p0y = initialFinger.y,
+            p1Id = initialFinger.injectedPointerId,
             p1x = startX,
             p1y = startY
         )
         val downOk = injectSafely(service, pDown, MODE_WAIT_FOR_FINISH)
         pDown.recycle()
-        if (!downOk) return false
+        if (!downOk) {
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
+            _diagnostics.update {
+                it.copy(lastBypassReport = "Co-Touch Swipe DOWN blocked: $detail")
+            }
+            return false
+        }
 
         for (i in 1..steps) {
             delay(stepDelay)
@@ -687,11 +715,13 @@ class ShizukuInputBridge(private val context: Context) {
             val liveFinger = resolveActiveFingerSnapshot(service) ?: initialFinger
             val move = obtainDualTouchEvent(
                 downTime = initialFinger.downTime,
-                eventTime = SystemClock.uptimeMillis(),
+                eventTime = maxOf(SystemClock.uptimeMillis(), initialFinger.downTime + 2L),
                 action = MotionEvent.ACTION_MOVE,
                 deviceId = initialFinger.deviceId,
+                p0Id = initialFinger.pointerId,
                 p0x = liveFinger.x,
                 p0y = liveFinger.y,
+                p1Id = initialFinger.injectedPointerId,
                 p1x = curX,
                 p1y = curY
             )
@@ -703,11 +733,13 @@ class ShizukuInputBridge(private val context: Context) {
         val pUpAction = MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
         val pUp = obtainDualTouchEvent(
             downTime = initialFinger.downTime,
-            eventTime = SystemClock.uptimeMillis(),
+            eventTime = maxOf(SystemClock.uptimeMillis(), initialFinger.downTime + 3L),
             action = pUpAction,
             deviceId = initialFinger.deviceId,
+            p0Id = initialFinger.pointerId,
             p0x = endFinger.x,
             p0y = endFinger.y,
+            p1Id = initialFinger.injectedPointerId,
             p1x = endX,
             p1y = endY
         )
@@ -720,8 +752,11 @@ class ShizukuInputBridge(private val context: Context) {
         val x: Float,
         val y: Float,
         val downTime: Long,
-        val deviceId: Int
-    )
+        val deviceId: Int,
+        val pointerId: Int
+    ) {
+        val injectedPointerId: Int get() = if (pointerId == 0) 1 else 0
+    }
 
     private fun resolveActiveFingerSnapshot(service: IInputInjectorService): FingerSnapshot? {
         val diag = _diagnostics.value
@@ -737,8 +772,9 @@ class ShizukuInputBridge(private val context: Context) {
                     return FingerSnapshot(
                         x = fx,
                         y = fy,
-                        downTime = SystemClock.uptimeMillis() - 100L,
-                        deviceId = diag.physicalTouchDeviceId
+                        downTime = if (diag.cooperativeFingerDownTime > 0L) diag.cooperativeFingerDownTime else SystemClock.uptimeMillis() - 100L,
+                        deviceId = diag.physicalTouchDeviceId,
+                        pointerId = diag.cooperativeFingerPointerId
                     )
                 }
             }
@@ -748,7 +784,8 @@ class ShizukuInputBridge(private val context: Context) {
                 x = diag.cooperativeFingerX,
                 y = diag.cooperativeFingerY,
                 downTime = if (diag.cooperativeFingerDownTime > 0L) diag.cooperativeFingerDownTime else SystemClock.uptimeMillis(),
-                deviceId = diag.physicalTouchDeviceId
+                deviceId = diag.physicalTouchDeviceId,
+                pointerId = diag.cooperativeFingerPointerId
             )
         }
         return null
@@ -773,18 +810,20 @@ class ShizukuInputBridge(private val context: Context) {
         eventTime: Long,
         action: Int,
         deviceId: Int,
+        p0Id: Int,
         p0x: Float,
         p0y: Float,
+        p1Id: Int,
         p1x: Float,
         p1y: Float
     ): MotionEvent {
         val props = arrayOf(
             MotionEvent.PointerProperties().apply {
-                id = 0
+                id = p0Id
                 toolType = MotionEvent.TOOL_TYPE_FINGER
             },
             MotionEvent.PointerProperties().apply {
-                id = 1
+                id = p1Id
                 toolType = MotionEvent.TOOL_TYPE_FINGER
             }
         )

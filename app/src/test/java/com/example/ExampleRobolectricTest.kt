@@ -6,6 +6,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
+import android.view.InputDevice
+import android.view.MotionEvent
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.AppDatabase
@@ -28,6 +31,7 @@ import com.example.service.PickerMode
 import com.example.service.PickerRequest
 import com.example.service.PickerResult
 import com.example.shizuku.ShizukuInputBridge
+import com.example.ui.screens.SandboxMultiPointerRouter
 import com.example.vision.ScreenDetector
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -283,5 +287,98 @@ class ExampleRobolectricTest {
         assertTrue(coordinator.msSinceLastUserTouch(5000L) > 10_000L)
         coordinator.recordUserTouchActivity(4900L)
         assertEquals(100L, coordinator.msSinceLastUserTouch(5000L))
+    }
+
+    @Test
+    fun sandboxRouter_routesPointerDownToTargetWhileJoystickDrags() {
+        var dragging = false
+        var cancelCount = 0
+        var targetHits = 0
+        var lastTool = ""
+        var coopDown = false
+        var coopPointerId = -1
+
+        val router = SandboxMultiPointerRouter(
+            onJoystickState = { isDragging, _, _, incCancel, _, _ ->
+                dragging = isDragging
+                if (incCancel) cancelCount++
+            },
+            onCooperativeFingerUpdate = { isDown, _, _, _, _, pointerId ->
+                coopDown = isDown
+                coopPointerId = pointerId
+            },
+            onTargetEvent = { _, _, toolLabel, _, countHit, _ ->
+                lastTool = toolLabel
+                if (countHit) targetHits++
+            }
+        )
+
+        val targetRect = RectF(0f, 0f, 400f, 400f)
+        val joystickRect = RectF(0f, 420f, 400f, 820f)
+        val props0 = arrayOf(MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER })
+        val coords0 = arrayOf(MotionEvent.PointerCoords().apply { x = 200f; y = 620f; pressure = 1f; size = 1f })
+
+        val down = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 1, props0, coords0, 0, 0, 1f, 1f, 4, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+        router.handleTouchEvent(down, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Co-Touch")
+        down.recycle()
+        assertTrue(dragging)
+        assertTrue(coopDown)
+        assertEquals(0, coopPointerId)
+        assertEquals(0, targetHits)
+
+        val propsDual = arrayOf(
+            MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER },
+            MotionEvent.PointerProperties().apply { id = 1; toolType = MotionEvent.TOOL_TYPE_FINGER }
+        )
+        val coordsDual = arrayOf(
+            MotionEvent.PointerCoords().apply { x = 210f; y = 630f; pressure = 1f; size = 1f },
+            MotionEvent.PointerCoords().apply { x = 200f; y = 200f; pressure = 1f; size = 1f }
+        )
+        val pDown = MotionEvent.obtain(
+            100L,
+            120L,
+            MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+            2,
+            propsDual,
+            coordsDual,
+            0,
+            0,
+            1f,
+            1f,
+            4,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
+            0
+        )
+        router.handleTouchEvent(pDown, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Co-Touch")
+        pDown.recycle()
+
+        assertTrue(dragging)
+        assertEquals(0, cancelCount)
+        assertEquals(1, targetHits)
+        assertEquals("FINGER(P1)", lastTool)
+
+        val pUp = MotionEvent.obtain(
+            100L,
+            165L,
+            MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+            2,
+            propsDual,
+            coordsDual,
+            0,
+            0,
+            1f,
+            1f,
+            4,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
+            0
+        )
+        router.handleTouchEvent(pUp, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Co-Touch")
+        pUp.recycle()
+
+        assertTrue(dragging)
+        assertEquals(0, cancelCount)
+        assertEquals(1, targetHits)
     }
 }
