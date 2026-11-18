@@ -166,6 +166,7 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         val devInputWritable = readableNode != null && testNodeWritable(readableNode)
         cachedEvdevWritable = devInputWritable
         val uinputWritable = testNodeWritable("/dev/uinput")
+        val uhidWritable = testNodeWritable("/dev/uhid")
 
         val rootAvailable = listOf(
             "/system/bin/su",
@@ -175,10 +176,12 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         ).any { path -> runCatching { File(path).exists() }.getOrDefault(false) }
 
         val accessSummary = when {
-            devInputWritable -> "evdev RW ($readableNode • maxSlot=$cachedEvdevMaxSlot • X=${cachedTouchMaxX.toInt()} Y=${cachedTouchMaxY.toInt()})"
+            devInputWritable -> "evdev RW ($readableNode • maxSlot=$cachedEvdevMaxSlot)"
+            devInputReadable && uhidWritable -> "evdev RO ($readableNode) • /dev/uhid RW"
             devInputReadable && uinputWritable -> "evdev RO ($readableNode) • /dev/uinput RW"
-            devInputReadable -> "evdev RO ($readableNode) • write blocked by SELinux"
-            else -> "/dev/input SELinux-blocked for uid 2000"
+            devInputReadable -> "evdev RO ($readableNode) • UHID blocked"
+            uhidWritable -> "evdev blocked • /dev/uhid RW"
+            else -> "/dev/input & /dev/uhid SELinux-blocked"
         }
 
         return JSONObject().apply {
@@ -187,6 +190,7 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
             put("devInputReadable", devInputReadable)
             put("devInputWritable", devInputWritable)
             put("uinputWritable", uinputWritable)
+            put("uhidWritable", uhidWritable)
             put("rootAvailable", rootAvailable)
             put("touchMonitorRunning", monitorRunning.get())
             put("note", "$touchName (id=$touchId) • $accessSummary")

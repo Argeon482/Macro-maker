@@ -49,8 +49,9 @@ enum class InputInjectionMode(val displayLabel: String, val shortDesc: String) {
 @Serializable
 enum class TouchGuardPolicy(val displayLabel: String, val cooldownMs: Long, val shortDesc: String) {
     OFF("Off", 0L, "Inject immediately without waiting for finger activity"),
-    YIELD_350MS("Yield 350ms", 350L, "Pause macro taps briefly when external user touch starts"),
-    YIELD_800MS("Yield 800ms", 800L, "Yield longer (800ms) during active manual touch bursts")
+    LIVE_RELEASE("Live Hold", 60L, "Holds while physical finger touches screen (getevent) and fires on lift"),
+    YIELD_350MS("Yield 350ms", 350L, "Holds while finger is active plus 350ms release cooldown"),
+    YIELD_800MS("Yield 800ms", 800L, "Holds while finger is active plus 800ms release cooldown")
 }
 
 @Serializable

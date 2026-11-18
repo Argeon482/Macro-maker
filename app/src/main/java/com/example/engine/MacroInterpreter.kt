@@ -23,6 +23,7 @@ import com.example.model.TouchGuardPolicy
 import com.example.model.VarComparator
 import com.example.model.VarOperation
 import com.example.service.OverlayCoordinator
+import com.example.shizuku.LiveTouchSnapshot
 import com.example.shizuku.ShizukuConnectionState
 import com.example.shizuku.ShizukuInputBridge
 import com.example.vision.ScreenDetector
@@ -124,6 +125,10 @@ class MacroInterpreter(
                 repository.appendLog(macro.id, macro.name, "Preflight", msg, LogLevel.ERROR)
             }
             return
+        }
+
+        if (macro.touchGuardPolicy != TouchGuardPolicy.OFF) {
+            shizukuBridge.ensureTouchMonitorStarted()
         }
 
         _state.value = RuntimeExecutionState(
@@ -478,16 +483,37 @@ class MacroInterpreter(
     }
 
     private suspend fun waitForTouchGuard(policy: TouchGuardPolicy) {
-        if (policy == TouchGuardPolicy.OFF || policy.cooldownMs <= 0L) return
-        val maxWaitMs = policy.cooldownMs * 2L
+        if (policy == TouchGuardPolicy.OFF) return
+        val maxHoldWaitMs = 20_000L
         var waitedMs = 0L
-        while (scope.isActive && waitedMs < maxWaitMs) {
-            val elapsedSinceTouch = overlayCoordinator.msSinceLastUserTouch()
-            if (elapsedSinceTouch >= policy.cooldownMs) return
-            updateTelemetry("Touch Guard yielding (${policy.displayLabel})...")
-            val stepMs = 45L
+        while (scope.isActive && waitedMs < maxHoldWaitMs) {
+            waitIfPaused()
+            val liveTouch = shizukuBridge.readLiveTouchSnapshot()
+            val outsideElapsed = overlayCoordinator.msSinceLastUserTouch()
+            if (!shouldYieldForTouchGuard(policy, liveTouch, outsideElapsed)) return
+            updateTelemetry(
+                if (liveTouch.isHolding) {
+                    "Touch Guard: Finger held (${liveTouch.source})"
+                } else {
+                    "Touch Guard yielding (${policy.displayLabel})..."
+                }
+            )
+            val stepMs = 35L
             delay(stepMs)
             waitedMs += stepMs
+        }
+    }
+
+    companion object {
+        internal fun shouldYieldForTouchGuard(
+            policy: TouchGuardPolicy,
+            liveTouch: LiveTouchSnapshot,
+            outsideElapsedMs: Long
+        ): Boolean {
+            if (policy == TouchGuardPolicy.OFF) return false
+            if (liveTouch.isHolding) return true
+            val minElapsed = minOf(liveTouch.msSinceLastActivity, outsideElapsedMs)
+            return minElapsed < policy.cooldownMs
         }
     }
 

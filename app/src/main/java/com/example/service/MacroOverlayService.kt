@@ -155,6 +155,7 @@ class MacroOverlayService : Service() {
                 }
                 showDockOverlay()
                 showTouchWatcherOverlay()
+                app.shizukuBridge.ensureTouchMonitorStarted()
                 app.overlayCoordinator.setOverlayShowing(true, macroId, macroName)
             }
         }
@@ -224,12 +225,14 @@ class MacroOverlayService : Service() {
                 val overlayState by app.overlayCoordinator.overlayState.collectAsState()
                 val execState by app.interpreter.state.collectAsState()
                 val shizukuStatus by app.shizukuBridge.status.collectAsState()
+                val hwDiagnostics by app.shizukuBridge.diagnostics.collectAsState()
                 val captureActive by app.screenDetector.isActive.collectAsState()
 
                 FloatingControlDock(
                     overlayState = overlayState,
                     executionState = execState,
                     shizukuStatus = shizukuStatus,
+                    hardwareDiagnostics = hwDiagnostics,
                     screenCaptureActive = captureActive,
                     onDragDelta = { dx, dy ->
                         dockParams?.let { p ->

@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.engine.ExecutionStatus
 import com.example.engine.RuntimeExecutionState
+import com.example.shizuku.HardwareInputDiagnostics
 import com.example.shizuku.ShizukuConnectionState
 import com.example.shizuku.ShizukuStatus
 import kotlin.math.roundToInt
@@ -85,6 +86,7 @@ fun FloatingControlDock(
     overlayState: OverlayUiState,
     executionState: RuntimeExecutionState,
     shizukuStatus: ShizukuStatus,
+    hardwareDiagnostics: HardwareInputDiagnostics = HardwareInputDiagnostics(),
     screenCaptureActive: Boolean,
     onDragDelta: (dx: Int, dy: Int) -> Unit,
     onPlayOrPause: () -> Unit,
@@ -228,6 +230,19 @@ fun FloatingControlDock(
                             fontFamily = FontFamily.Monospace
                         )
                     }
+
+                    Text(
+                        text = if (hardwareDiagnostics.touchMonitorRunning) {
+                            "Touch Guard: Live evdev (Slot 0)"
+                        } else if (hardwareDiagnostics.devInputReadable) {
+                            "Touch Guard: evdev standby"
+                        } else {
+                            "Touch Guard: Outside-touch watcher"
+                        },
+                        color = if (hardwareDiagnostics.touchMonitorRunning) StudioEmerald else StudioMuted,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

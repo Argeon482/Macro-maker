@@ -419,8 +419,11 @@ fun TouchSandboxScreen(
     onTestSwipe: (sx: Float, sy: Float, ex: Float, ey: Float, mode: InputInjectionMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedMode by remember { mutableStateOf(InputInjectionMode.CO_TOUCH_MULTIPLEX) }
+    var selectedMode by remember { mutableStateOf(InputInjectionMode.MOUSE_HOVER_CLICK) }
     var autoBurstRunning by remember { mutableStateOf(false) }
+    var liveGuardEnabled by remember { mutableStateOf(false) }
+    var queuedGuardTap by remember { mutableStateOf(false) }
+    var queuedGuardSwipe by remember { mutableStateOf(false) }
 
     // Manual finger joystick telemetry
     var isFingerDragging by remember { mutableStateOf(false) }
@@ -496,11 +499,45 @@ fun TouchSandboxScreen(
         onRefreshCapabilities()
     }
 
-    LaunchedEffect(autoBurstRunning, selectedMode, targetScreenCenter) {
+    val touchGuardYielding = liveGuardEnabled &&
+        (isFingerDragging || hardwareDiagnostics.cooperativeFingerDown)
+
+    LaunchedEffect(
+        touchGuardYielding,
+        queuedGuardTap,
+        queuedGuardSwipe,
+        selectedMode,
+        targetScreenCenter,
+        padScreenOrigin,
+        padSize
+    ) {
+        if (!touchGuardYielding && (queuedGuardTap || queuedGuardSwipe)) {
+            delay(65L)
+            if (queuedGuardTap && targetScreenCenter != Offset.Zero) {
+                queuedGuardTap = false
+                onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedMode)
+            }
+            if (queuedGuardSwipe && padSize.width > 0) {
+                queuedGuardSwipe = false
+                val sx = padScreenOrigin.x + padSize.width * 0.2f
+                val ex = padScreenOrigin.x + padSize.width * 0.8f
+                val sy = padScreenOrigin.y + padSize.height * 0.82f
+                onTestSwipe(sx, sy, ex, sy, selectedMode)
+            }
+        }
+    }
+
+    LaunchedEffect(autoBurstRunning, selectedMode, targetScreenCenter, liveGuardEnabled) {
         if (autoBurstRunning && targetScreenCenter != Offset.Zero) {
             while (autoBurstRunning) {
-                onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedMode)
-                delay(420L)
+                val blockedByGuard = liveGuardEnabled &&
+                    (isFingerDragging || hardwareDiagnostics.cooperativeFingerDown)
+                if (blockedByGuard) {
+                    delay(45L)
+                } else {
+                    onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedMode)
+                    delay(420L)
+                }
             }
         }
     }
@@ -588,17 +625,23 @@ fun TouchSandboxScreen(
                             )
                         }
 
+                        val evdevLabel = when {
+                            hardwareDiagnostics.devInputWritable ->
+                                "evdev: RW (${hardwareDiagnostics.physicalTouchDeviceName})"
+                            hardwareDiagnostics.devInputReadable ->
+                                "evdev: RO (${hardwareDiagnostics.physicalTouchDeviceName})"
+                            else -> "evdev: SELinux-blocked"
+                        }
+                        val uhidLabel = if (hardwareDiagnostics.uhidWritable) "uhid: RW" else "uhid: Blocked"
+                        val monitorLabel = if (hardwareDiagnostics.touchMonitorRunning) "GuardMon: LIVE" else "GuardMon: OFF"
                         Text(
-                            text = when {
-                                hardwareDiagnostics.devInputWritable ->
-                                    "evdev: RW WRITABLE (${hardwareDiagnostics.physicalTouchDeviceName}) • Kernel Slot 9 READY"
-                                hardwareDiagnostics.devInputReadable ->
-                                    "evdev: RO READ-ONLY (${hardwareDiagnostics.physicalTouchDeviceName}) • Write blocked by SELinux"
-                                else ->
-                                    "evdev: SELinux-blocked • Hover Click & Touch Guard"
-                            },
+                            text = "$evdevLabel • $uhidLabel • $monitorLabel",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (hardwareDiagnostics.devInputWritable) EmeraldRun else AmberLogic,
+                            color = if (hardwareDiagnostics.uhidWritable || hardwareDiagnostics.devInputWritable) {
+                                EmeraldRun
+                            } else {
+                                AmberLogic
+                            },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -615,6 +658,26 @@ fun TouchSandboxScreen(
                                     modifier = Modifier.testTag("sandbox_mode_${mode.name.lowercase()}")
                                 )
                             }
+                            FilterChip(
+                                selected = liveGuardEnabled,
+                                onClick = {
+                                    liveGuardEnabled = !liveGuardEnabled
+                                    if (!liveGuardEnabled) {
+                                        queuedGuardTap = false
+                                        queuedGuardSwipe = false
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        text = when {
+                                            touchGuardYielding -> "Guard: YIELDING"
+                                            liveGuardEnabled -> "Guard: Live Hold"
+                                            else -> "Guard: Off"
+                                        }
+                                    )
+                                },
+                                modifier = Modifier.testTag("sandbox_guard_toggle")
+                            )
                         }
 
                         Row(
@@ -622,9 +685,18 @@ fun TouchSandboxScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = if (isFingerDragging) "Finger: DRAGGING ($dragMoveSamples)" else "Finger: IDLE ($dragMoveSamples)",
+                                text = when {
+                                    touchGuardYielding -> "Guard: YIELDING (Finger held)"
+                                    queuedGuardTap || queuedGuardSwipe -> "Guard: QUEUED until release"
+                                    isFingerDragging -> "Finger: DRAGGING ($dragMoveSamples)"
+                                    else -> "Finger: IDLE ($dragMoveSamples)"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isFingerDragging) EmeraldRun else TextSecondary
+                                color = when {
+                                    touchGuardYielding -> AmberLogic
+                                    isFingerDragging -> EmeraldRun
+                                    else -> TextSecondary
+                                }
                             )
                             Text(
                                 text = "Last Tool: $lastReceivedTool",
@@ -820,17 +892,21 @@ fun TouchSandboxScreen(
 
                     Button(
                         onClick = {
-                            val cx = if (targetScreenCenter != Offset.Zero) {
-                                targetScreenCenter.x
+                            if (touchGuardYielding) {
+                                queuedGuardTap = true
                             } else {
-                                padScreenOrigin.x + padSize.width / 2f
+                                val cx = if (targetScreenCenter != Offset.Zero) {
+                                    targetScreenCenter.x
+                                } else {
+                                    padScreenOrigin.x + padSize.width / 2f
+                                }
+                                val cy = if (targetScreenCenter != Offset.Zero) {
+                                    targetScreenCenter.y
+                                } else {
+                                    padScreenOrigin.y + padSize.height / 2f
+                                }
+                                onTestTap(cx, cy, selectedMode)
                             }
-                            val cy = if (targetScreenCenter != Offset.Zero) {
-                                targetScreenCenter.y
-                            } else {
-                                padScreenOrigin.y + padSize.height / 2f
-                            }
-                            onTestTap(cx, cy, selectedMode)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color(0xFF04131A)),
                         modifier = Modifier
@@ -840,15 +916,19 @@ fun TouchSandboxScreen(
                     ) {
                         Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Tap", fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text(if (queuedGuardTap) "Queued" else "Tap", fontWeight = FontWeight.Bold, maxLines = 1)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            val sx = padScreenOrigin.x + padSize.width * 0.2f
-                            val ex = padScreenOrigin.x + padSize.width * 0.8f
-                            val sy = padScreenOrigin.y + padSize.height * 0.82f
-                            onTestSwipe(sx, sy, ex, sy, selectedMode)
+                            if (touchGuardYielding) {
+                                queuedGuardSwipe = true
+                            } else {
+                                val sx = padScreenOrigin.x + padSize.width * 0.2f
+                                val ex = padScreenOrigin.x + padSize.width * 0.8f
+                                val sy = padScreenOrigin.y + padSize.height * 0.82f
+                                onTestSwipe(sx, sy, ex, sy, selectedMode)
+                            }
                         },
                         modifier = Modifier
                             .weight(1f)
@@ -857,7 +937,7 @@ fun TouchSandboxScreen(
                     ) {
                         Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp), tint = AmberLogic)
                         Spacer(Modifier.width(4.dp))
-                        Text("Swipe", color = TextPrimary, maxLines = 1)
+                        Text(if (queuedGuardSwipe) "Queued" else "Swipe", color = TextPrimary, maxLines = 1)
                     }
                 }
             }

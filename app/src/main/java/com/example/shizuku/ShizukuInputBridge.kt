@@ -47,12 +47,19 @@ data class ShizukuStatus(
     val lastError: String? = null
 )
 
+data class LiveTouchSnapshot(
+    val isHolding: Boolean,
+    val msSinceLastActivity: Long,
+    val source: String
+)
+
 data class HardwareInputDiagnostics(
     val physicalTouchDeviceId: Int = 0,
     val physicalTouchDeviceName: String = "Unknown",
     val devInputReadable: Boolean = false,
     val devInputWritable: Boolean = false,
     val uinputWritable: Boolean = false,
+    val uhidWritable: Boolean = false,
     val rootAvailable: Boolean = false,
     val touchMonitorRunning: Boolean = false,
     val cooperativeFingerDown: Boolean = false,
@@ -278,6 +285,7 @@ class ShizukuInputBridge(private val context: Context) {
                 val devReadable = json.optBoolean("devInputReadable", false)
                 val devWritable = json.optBoolean("devInputWritable", false)
                 val uinputWritable = json.optBoolean("uinputWritable", false)
+                val uhidWritable = json.optBoolean("uhidWritable", false)
                 val monitorStarted = if (devReadable) {
                     runCatching { service.startTouchMonitor() }.getOrDefault(false)
                 } else {
@@ -290,6 +298,7 @@ class ShizukuInputBridge(private val context: Context) {
                         devInputReadable = devReadable,
                         devInputWritable = devWritable,
                         uinputWritable = uinputWritable,
+                        uhidWritable = uhidWritable,
                         rootAvailable = json.optBoolean("rootAvailable", false),
                         touchMonitorRunning = monitorStarted || json.optBoolean("touchMonitorRunning", false),
                         lastBypassReport = json.optString("note", raw)
@@ -297,6 +306,50 @@ class ShizukuInputBridge(private val context: Context) {
                 }
             }
         }
+    }
+
+    fun ensureTouchMonitorStarted() {
+        val service = injectorService ?: return
+        val diag = _diagnostics.value
+        if (diag.touchMonitorRunning) return
+        if (!diag.devInputReadable && diag.physicalTouchDeviceId == 0) {
+            refreshCapabilities()
+            return
+        }
+        if (diag.devInputReadable) {
+            ioScope.launch {
+                val started = runCatching { service.startTouchMonitor() }.getOrDefault(false)
+                if (started) {
+                    _diagnostics.update { it.copy(touchMonitorRunning = true) }
+                }
+            }
+        }
+    }
+
+    fun readLiveTouchSnapshot(nowMs: Long = System.currentTimeMillis()): LiveTouchSnapshot {
+        val diag = _diagnostics.value
+        if (diag.cooperativeFingerDown) {
+            return LiveTouchSnapshot(
+                isHolding = true,
+                msSinceLastActivity = 0L,
+                source = "sandbox"
+            )
+        }
+        val service = injectorService
+        if (service != null && diag.devInputReadable && diag.touchMonitorRunning) {
+            val parts = runCatching { service.readLatestFingerState().split(',') }.getOrNull()
+            if (parts != null && parts.size >= 4) {
+                val isDown = parts[0] == "1"
+                val updatedMs = parts[3].toLongOrNull() ?: 0L
+                return if (isDown) {
+                    LiveTouchSnapshot(isHolding = true, msSinceLastActivity = 0L, source = "getevent")
+                } else {
+                    val elapsed = if (updatedMs > 0L) (nowMs - updatedMs).coerceAtLeast(0L) else Long.MAX_VALUE
+                    LiveTouchSnapshot(isHolding = false, msSinceLastActivity = elapsed, source = "getevent")
+                }
+            }
+        }
+        return LiveTouchSnapshot(isHolding = false, msSinceLastActivity = Long.MAX_VALUE, source = "none")
     }
 
     fun updateCooperativeFingerState(

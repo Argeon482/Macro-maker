@@ -33,6 +33,7 @@ import com.example.service.OverlayCoordinator
 import com.example.service.PickerMode
 import com.example.service.PickerRequest
 import com.example.service.PickerResult
+import com.example.shizuku.LiveTouchSnapshot
 import com.example.shizuku.ShizukuInputBridge
 import com.example.ui.screens.SandboxMultiPointerRouter
 import com.example.vision.ScreenDetector
@@ -40,6 +41,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -433,5 +435,38 @@ class ExampleRobolectricTest {
         assertEquals(0, cancelCount)
         assertEquals(1, targetHits)
         assertEquals("MOUSE_BTN", lastTool)
+    }
+
+    @Test
+    fun touchGuard_liveHoldAndYieldPolicies_respectFingerHoldAndCooldown() {
+        val holding = LiveTouchSnapshot(isHolding = true, msSinceLastActivity = 0L, source = "getevent")
+        val justReleased = LiveTouchSnapshot(isHolding = false, msSinceLastActivity = 20L, source = "getevent")
+        val settledFast = LiveTouchSnapshot(isHolding = false, msSinceLastActivity = 80L, source = "getevent")
+        val settledLong = LiveTouchSnapshot(isHolding = false, msSinceLastActivity = 400L, source = "getevent")
+
+        // OFF never yields
+        assertFalse(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.OFF, holding, 0L))
+
+        // LIVE_RELEASE yields while held or within 60ms debounce, then fires cleanly
+        assertTrue(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.LIVE_RELEASE, holding, 5_000L))
+        assertTrue(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.LIVE_RELEASE, justReleased, 5_000L))
+        assertFalse(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.LIVE_RELEASE, settledFast, 5_000L))
+
+        // YIELD_350MS holds regardless of stale outside timer while evdev reports holding, and waits minOf(live, outside) >= 350ms
+        assertTrue(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.YIELD_350MS, holding, 9_000L))
+        assertTrue(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.YIELD_350MS, settledFast, 9_000L))
+        assertTrue(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.YIELD_350MS, settledLong, 200L))
+        assertFalse(MacroInterpreter.shouldYieldForTouchGuard(TouchGuardPolicy.YIELD_350MS, settledLong, 360L))
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val bridge = ShizukuInputBridge(context)
+        bridge.updateCooperativeFingerState(true, 100f, 200f, 10L, 6, 0)
+        val snapDown = bridge.readLiveTouchSnapshot()
+        assertTrue(snapDown.isHolding)
+        assertEquals("sandbox", snapDown.source)
+
+        bridge.updateCooperativeFingerState(false, 0f, 0f, 0L, 6, 0)
+        val snapUp = bridge.readLiveTouchSnapshot()
+        assertFalse(snapUp.isHolding)
     }
 }
