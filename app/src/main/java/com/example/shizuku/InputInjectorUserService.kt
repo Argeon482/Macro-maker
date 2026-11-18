@@ -2,6 +2,8 @@ package com.example.shizuku
 
 import android.annotation.SuppressLint
 import android.hardware.input.InputManager
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import android.view.InputDevice
 import android.view.InputEvent
@@ -9,6 +11,7 @@ import android.view.MotionEvent
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
@@ -72,6 +75,19 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
     private var lastInjectDiagnostic: String = "No events injected yet"
 
     private val trackingIdSeq = AtomicInteger(9000)
+
+    private val uhidLock = Any()
+
+    @Volatile
+    private var uhidFd: FileDescriptor? = null
+
+    @Volatile
+    private var uhidStarted: Boolean = false
+
+    @Volatile
+    private var uhidDeviceId: Int = 0
+
+    private var uhidReaderThread: Thread? = null
 
     private var isIInputManagerFallback: Boolean = false
 
@@ -497,8 +513,240 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         }
     }
 
+    override fun injectUhidTap(
+        screenX: Float,
+        screenY: Float,
+        screenW: Int,
+        screenH: Int,
+        holdMs: Long
+    ): Boolean {
+        if (!ensureUhidTouchDevice()) return false
+        val hx = scaleScreenToHid(screenX, screenW)
+        val hy = scaleScreenToHid(screenY, screenH)
+        return try {
+            sendUhidTouchReport(touching = true, contactId = 1, x = hx, y = hy)
+            if (holdMs > 0) {
+                Thread.sleep(holdMs.coerceIn(10L, 1500L))
+            }
+            sendUhidTouchReport(touching = false, contactId = 1, x = hx, y = hy)
+            val devId = refreshUhidDeviceId()
+            lastInjectDiagnostic = "UHID Touch OK (dev=$devId, hid=$hx,$hy)"
+            true
+        } catch (t: Throwable) {
+            lastInjectDiagnostic = "UHID tap failed: ${t.javaClass.simpleName}: ${t.message}"
+            destroyUhidDevice()
+            false
+        }
+    }
+
+    override fun injectUhidSwipe(
+        sx: Float,
+        sy: Float,
+        ex: Float,
+        ey: Float,
+        screenW: Int,
+        screenH: Int,
+        durationMs: Long,
+        steps: Int
+    ): Boolean {
+        if (!ensureUhidTouchDevice()) return false
+        val safeSteps = steps.coerceIn(4, 100)
+        val stepDelay = (durationMs / safeSteps).coerceAtLeast(4L)
+        return try {
+            val startHx = scaleScreenToHid(sx, screenW)
+            val startHy = scaleScreenToHid(sy, screenH)
+            sendUhidTouchReport(touching = true, contactId = 1, x = startHx, y = startHy)
+
+            for (i in 1..safeSteps) {
+                Thread.sleep(stepDelay)
+                val t = i.toFloat() / safeSteps.toFloat()
+                val curHx = scaleScreenToHid(sx + (ex - sx) * t, screenW)
+                val curHy = scaleScreenToHid(sy + (ey - sy) * t, screenH)
+                sendUhidTouchReport(touching = true, contactId = 1, x = curHx, y = curHy)
+            }
+
+            val endHx = scaleScreenToHid(ex, screenW)
+            val endHy = scaleScreenToHid(ey, screenH)
+            sendUhidTouchReport(touching = false, contactId = 1, x = endHx, y = endHy)
+            val devId = refreshUhidDeviceId()
+            lastInjectDiagnostic = "UHID Swipe OK (dev=$devId)"
+            true
+        } catch (t: Throwable) {
+            lastInjectDiagnostic = "UHID swipe failed: ${t.javaClass.simpleName}: ${t.message}"
+            destroyUhidDevice()
+            false
+        }
+    }
+
+    private fun ensureUhidTouchDevice(): Boolean {
+        synchronized(uhidLock) {
+            val existing = uhidFd
+            if (existing != null && existing.valid()) {
+                return true
+            }
+            return try {
+                val fd = Os.open("/dev/uhid", OsConstants.O_RDWR or OsConstants.O_CLOEXEC, 0)
+                uhidFd = fd
+                uhidStarted = false
+
+                startUhidReaderThread(fd)
+
+                val createBuf = ByteBuffer.allocate(UHID_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                createBuf.putInt(UHID_CREATE2)
+                putFixedCString(createBuf, UHID_DEVICE_NAME, 128)
+                putFixedCString(createBuf, "uhid/shizumacro0", 64)
+                putFixedCString(createBuf, "shizumacro-hid-touch", 64)
+                createBuf.putShort(UHID_TOUCH_REPORT_DESCRIPTOR.size.toShort())
+                createBuf.putShort(BUS_USB.toShort())
+                createBuf.putInt(0x18D1) // Google vendor ID
+                createBuf.putInt(0x534D) // SM product ID
+                createBuf.putInt(1)
+                createBuf.putInt(0)
+                createBuf.put(UHID_TOUCH_REPORT_DESCRIPTOR)
+
+                writeUhidFully(fd, createBuf.array(), UHID_EVENT_SIZE)
+
+                val deadline = System.currentTimeMillis() + 500L
+                while (!uhidStarted && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(15L)
+                }
+                Thread.sleep(60L)
+                refreshUhidDeviceId()
+                true
+            } catch (t: Throwable) {
+                lastInjectDiagnostic = "UHID create failed: ${t.javaClass.simpleName}: ${t.message}"
+                destroyUhidDeviceLocked()
+                false
+            }
+        }
+    }
+
+    private fun startUhidReaderThread(fd: FileDescriptor) {
+        uhidReaderThread = Thread({
+            val buf = ByteArray(UHID_EVENT_SIZE)
+            while (uhidFd === fd && fd.valid()) {
+                val n = try {
+                    Os.read(fd, buf, 0, buf.size)
+                } catch (_: Throwable) {
+                    break
+                }
+                if (n < 4) break
+                val bb = ByteBuffer.wrap(buf, 0, n).order(ByteOrder.LITTLE_ENDIAN)
+                when (bb.int) {
+                    UHID_START -> {
+                        uhidStarted = true
+                    }
+                    UHID_GET_REPORT -> {
+                        if (n >= 10) {
+                            val reqId = bb.int
+                            val rnum = bb.get().toInt() and 0xFF
+                            val reply = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)
+                            reply.putInt(UHID_GET_REPORT_REPLY)
+                            reply.putInt(reqId)
+                            if (rnum == 2) {
+                                reply.putShort(0) // err = 0
+                                reply.putShort(2) // size = 2
+                                reply.put(0x02.toByte()) // Report ID 2
+                                reply.put(0x0A.toByte()) // Max Contacts = 10
+                            } else {
+                                reply.putShort(5.toShort()) // EIO
+                                reply.putShort(0)
+                            }
+                            runCatching { writeUhidFully(fd, reply.array(), reply.capacity()) }
+                        }
+                    }
+                    UHID_SET_REPORT -> {
+                        if (n >= 10) {
+                            val reqId = bb.int
+                            val reply = ByteBuffer.allocate(10).order(ByteOrder.LITTLE_ENDIAN)
+                            reply.putInt(UHID_SET_REPORT_REPLY)
+                            reply.putInt(reqId)
+                            reply.putShort(0)
+                            runCatching { writeUhidFully(fd, reply.array(), reply.capacity()) }
+                        }
+                    }
+                }
+            }
+        }, "ShizuUhidMon").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun sendUhidTouchReport(touching: Boolean, contactId: Int, x: Int, y: Int) {
+        synchronized(uhidLock) {
+            val fd = uhidFd ?: error("UHID device closed")
+            val packet = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)
+            packet.putInt(UHID_INPUT2)
+            packet.putShort(8) // 8-byte HID input report
+            packet.put(0x01.toByte()) // Report ID 1
+            packet.put((if (touching) 0x03 else 0x00).toByte()) // Tip Switch + In Range
+            packet.put(contactId.toByte())
+            packet.putShort(x.coerceIn(0, HID_AXIS_MAX).toShort())
+            packet.putShort(y.coerceIn(0, HID_AXIS_MAX).toShort())
+            packet.put((if (touching) 0x01 else 0x00).toByte()) // Contact Count
+            writeUhidFully(fd, packet.array(), packet.capacity())
+        }
+    }
+
+    private fun writeUhidFully(fd: FileDescriptor, data: ByteArray, length: Int) {
+        var offset = 0
+        while (offset < length) {
+            val written = Os.write(fd, data, offset, length - offset)
+            if (written <= 0) error("Short write to /dev/uhid")
+            offset += written
+        }
+    }
+
+    private fun putFixedCString(buf: ByteBuffer, text: String, fieldLen: Int) {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val copyLen = minOf(bytes.size, fieldLen - 1)
+        buf.put(bytes, 0, copyLen)
+        repeat(fieldLen - copyLen) { buf.put(0) }
+    }
+
+    private fun scaleScreenToHid(coord: Float, screenDim: Int): Int {
+        val dim = screenDim.coerceAtLeast(1).toFloat()
+        val norm = (coord / dim).coerceIn(0f, 1f)
+        return (norm * HID_AXIS_MAX).roundToInt().coerceIn(0, HID_AXIS_MAX)
+    }
+
+    private fun refreshUhidDeviceId(): Int {
+        val dev = runCatching {
+            InputDevice.getDeviceIds().asSequence()
+                .mapNotNull { id -> runCatching { InputDevice.getDevice(id) }.getOrNull() }
+                .firstOrNull { it.name == UHID_DEVICE_NAME }
+        }.getOrNull()
+        if (dev != null) {
+            uhidDeviceId = dev.id
+        }
+        return uhidDeviceId
+    }
+
+    private fun destroyUhidDevice() {
+        synchronized(uhidLock) {
+            destroyUhidDeviceLocked()
+        }
+    }
+
+    private fun destroyUhidDeviceLocked() {
+        val fd = uhidFd
+        uhidFd = null
+        uhidStarted = false
+        uhidDeviceId = 0
+        if (fd != null && fd.valid()) {
+            runCatching {
+                val destroy = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(UHID_DESTROY)
+                Os.write(fd, destroy.array(), 0, 4)
+            }
+            runCatching { Os.close(fd) }
+        }
+        uhidReaderThread = null
+    }
+
     override fun destroy() {
         stopTouchMonitor()
+        destroyUhidDevice()
         exitProcess(0)
     }
 
@@ -635,5 +883,64 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         private const val ABS_MT_POSITION_Y = 0x36
         private const val ABS_MT_TRACKING_ID = 0x39
         private const val ABS_MT_PRESSURE = 0x3a
+        private const val UHID_DESTROY = 1
+        private const val UHID_START = 2
+        private const val UHID_GET_REPORT = 9
+        private const val UHID_GET_REPORT_REPLY = 10
+        private const val UHID_CREATE2 = 11
+        private const val UHID_INPUT2 = 12
+        private const val UHID_SET_REPORT = 13
+        private const val UHID_SET_REPORT_REPLY = 14
+        private const val UHID_EVENT_SIZE = 4376
+        private const val BUS_USB = 0x03
+        private const val HID_AXIS_MAX = 32767
+        private const val UHID_DEVICE_NAME = "ShizuMacro-UHID-Touch"
+
+        // Multi-touch USB HID Digitizer Touch Screen descriptor (Report ID 1 = 8-byte finger input, Report ID 2 = max contacts feature)
+        private val UHID_TOUCH_REPORT_DESCRIPTOR = byteArrayOf(
+            0x05, 0x0D,             // USAGE_PAGE (Digitizers)
+            0x09, 0x04,             // USAGE (Touch Screen)
+            0xA1.toByte(), 0x01,    // COLLECTION (Application)
+            0x85.toByte(), 0x01,    //   REPORT_ID (1)
+            0x09, 0x22,             //   USAGE (Finger)
+            0xA1.toByte(), 0x02,    //   COLLECTION (Logical)
+            0x09, 0x42,             //     USAGE (Tip Switch)
+            0x15, 0x00,             //     LOGICAL_MINIMUM (0)
+            0x25, 0x01,             //     LOGICAL_MAXIMUM (1)
+            0x75, 0x01,             //     REPORT_SIZE (1)
+            0x95.toByte(), 0x01,    //     REPORT_COUNT (1)
+            0x81.toByte(), 0x02,    //     INPUT (Data,Var,Abs)
+            0x09, 0x32,             //     USAGE (In Range)
+            0x81.toByte(), 0x02,    //     INPUT (Data,Var,Abs)
+            0x95.toByte(), 0x06,    //     REPORT_COUNT (6)
+            0x81.toByte(), 0x03,    //     INPUT (Cnst,Var,Abs)
+            0x75, 0x08,             //     REPORT_SIZE (8)
+            0x09, 0x51,             //     USAGE (Contact Identifier)
+            0x25, 0x0A,             //     LOGICAL_MAXIMUM (10)
+            0x95.toByte(), 0x01,    //     REPORT_COUNT (1)
+            0x81.toByte(), 0x02,    //     INPUT (Data,Var,Abs)
+            0x05, 0x01,             //     USAGE_PAGE (Generic Desktop)
+            0x15, 0x00,             //     LOGICAL_MINIMUM (0)
+            0x26, 0xFF.toByte(), 0x7F, //  LOGICAL_MAXIMUM (32767)
+            0x75, 0x10,             //     REPORT_SIZE (16)
+            0x95.toByte(), 0x01,    //     REPORT_COUNT (1)
+            0x09, 0x30,             //     USAGE (X)
+            0x81.toByte(), 0x02,    //     INPUT (Data,Var,Abs)
+            0x09, 0x31,             //     USAGE (Y)
+            0x81.toByte(), 0x02,    //     INPUT (Data,Var,Abs)
+            0xC0.toByte(),          //   END_COLLECTION
+            0x05, 0x0D,             //   USAGE_PAGE (Digitizers)
+            0x09, 0x54,             //   USAGE (Contact Count)
+            0x15, 0x00,             //   LOGICAL_MINIMUM (0)
+            0x25, 0x0A,             //   LOGICAL_MAXIMUM (10)
+            0x75, 0x08,             //   REPORT_SIZE (8)
+            0x95.toByte(), 0x01,    //   REPORT_COUNT (1)
+            0x81.toByte(), 0x02,    //   INPUT (Data,Var,Abs)
+            0x85.toByte(), 0x02,    //   REPORT_ID (2)
+            0x09, 0x55,             //   USAGE (Contact Count Maximum)
+            0x25, 0x0A,             //   LOGICAL_MAXIMUM (10)
+            0xB1.toByte(), 0x02,    //   FEATURE (Data,Var,Abs)
+            0xC0.toByte()           // END_COLLECTION
+        )
     }
 }

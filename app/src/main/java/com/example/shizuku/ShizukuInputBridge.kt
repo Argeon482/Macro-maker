@@ -108,7 +108,7 @@ class ShizukuInputBridge(private val context: Context) {
             .daemon(false)
             .processNameSuffix("shizuku_injector")
             .debuggable(BuildConfig.DEBUG)
-            .version(4)
+            .version(5)
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -449,6 +449,16 @@ class ShizukuInputBridge(private val context: Context) {
                 _diagnostics.update { it.copy(lastBypassReport = detail) }
                 if (ok) return@withContext true
             }
+            if (_diagnostics.value.uhidWritable) {
+                val (psx, psy, pw, ph) = toNaturalPanelCoords(startX, startY)
+                val (pex, pey, _, _) = toNaturalPanelCoords(endX, endY)
+                val ok = runCatching {
+                    service.injectUhidSwipe(psx, psy, pex, pey, pw, ph, durationMs, safeSteps)
+                }.getOrDefault(false)
+                val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+                _diagnostics.update { it.copy(lastBypassReport = detail) }
+                if (ok) return@withContext true
+            }
             val finger = resolveActiveFingerSnapshot(service)
             if (finger != null) {
                 return@withContext injectCoTouchSwipe(
@@ -685,6 +695,15 @@ class ShizukuInputBridge(private val context: Context) {
             val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
             _diagnostics.update { it.copy(lastBypassReport = detail) }
             if (evdevOk) return true
+        }
+        if (_diagnostics.value.uhidWritable) {
+            val (px, py, pw, ph) = toNaturalPanelCoords(tx, ty)
+            val uhidOk = runCatching {
+                service.injectUhidTap(px, py, pw, ph, holdMs)
+            }.getOrDefault(false)
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+            _diagnostics.update { it.copy(lastBypassReport = detail) }
+            if (uhidOk) return true
         }
 
         val finger = resolveActiveFingerSnapshot(service)
