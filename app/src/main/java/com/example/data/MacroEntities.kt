@@ -11,6 +11,7 @@ data class MacroEntity(
     val targetAppLabel: String,
     val loopCount: Int,
     val pollingIntervalMs: Long,
+    val injectionMode: String = "MOUSE",
     val stepsJson: String,
     val createdAt: Long,
     val updatedAt: Long

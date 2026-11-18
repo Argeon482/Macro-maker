@@ -383,8 +383,8 @@ private fun ShizuMacroRoot(
                         composable<AppRoute.TouchSandbox> {
                             TouchSandboxScreen(
                                 shizukuStatus = shizukuStatus,
-                                onTestTap = { x, y -> viewModel.testShizukuTapInSandbox(x, y) },
-                                onTestSwipe = { sx, sy, ex, ey -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey) }
+                                onTestTap = { x, y, mode -> viewModel.testShizukuTapInSandbox(x, y, mode) },
+                                onTestSwipe = { sx, sy, ex, ey, mode -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey, mode) }
                             )
                         }
 

@@ -207,9 +207,9 @@ class MacroInterpreter(
 
                     when (step) {
                         is TapStep -> {
-                            val ok = shizukuBridge.tap(step.x, step.y, step.holdMs, step.jitterPx)
+                            val ok = shizukuBridge.tap(step.x, step.y, step.holdMs, step.jitterPx, macro.injectionMode)
                             val msg = if (ok) {
-                                "Tap (${step.x.toInt()}, ${step.y.toInt()})"
+                                "Tap (${step.x.toInt()}, ${step.y.toInt()}) [${macro.injectionMode.displayLabel}]"
                             } else {
                                 "Tap failed at (${step.x.toInt()}, ${step.y.toInt()})"
                             }
@@ -228,9 +228,10 @@ class MacroInterpreter(
                                 step.endX,
                                 step.endY,
                                 step.durationMs,
-                                step.interpolateSteps
+                                step.interpolateSteps,
+                                macro.injectionMode
                             )
-                            val msg = "Swipe (${step.startX.toInt()},${step.startY.toInt()}) -> (${step.endX.toInt()},${step.endY.toInt()})"
+                            val msg = "Swipe (${step.startX.toInt()},${step.startY.toInt()}) -> (${step.endX.toInt()},${step.endY.toInt()}) [${macro.injectionMode.displayLabel}]"
                             updateTelemetry(msg)
                             if (!ok) {
                                 failExecution(macro, step.label, "Shizuku swipe injection failed")
@@ -350,7 +351,7 @@ class MacroInterpreter(
                                         LogLevel.SUCCESS
                                     )
                                     if (step.tapOnMatch) {
-                                        shizukuBridge.tap(step.x.toFloat(), step.y.toFloat())
+                                        shizukuBridge.tap(step.x.toFloat(), step.y.toFloat(), mode = macro.injectionMode)
                                     }
                                     pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
                                         stopRequested = true
@@ -390,7 +391,7 @@ class MacroInterpreter(
                                         LogLevel.SUCCESS
                                     )
                                     if (step.tapOnMatch) {
-                                        shizukuBridge.tap(result.centerX.toFloat(), result.centerY.toFloat())
+                                        shizukuBridge.tap(result.centerX.toFloat(), result.centerY.toFloat(), mode = macro.injectionMode)
                                     }
                                     pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
                                         stopRequested = true

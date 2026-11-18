@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,6 +40,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -68,6 +71,7 @@ import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
+import com.example.model.InputInjectionMode
 import com.example.model.JumpStep
 import com.example.model.KeyPressStep
 import com.example.model.LoopEndStep
@@ -163,7 +167,7 @@ fun MacroEditorScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${macro.steps.size} nodes • ${if (macro.loopCount <= 0) "∞ passes" else "${macro.loopCount} pass"}",
+                            text = "${macro.steps.size} nodes • ${if (macro.loopCount <= 0) "∞ passes" else "${macro.loopCount} pass"} • ${macro.injectionMode.displayLabel}",
                             style = MaterialTheme.typography.labelSmall,
                             color = ElectricCyan
                         )
@@ -430,6 +434,7 @@ private fun StepNodeCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MacroSettingsDialog(
     macro: MacroDefinition,
@@ -440,6 +445,7 @@ private fun MacroSettingsDialog(
     var target by remember(macro) { mutableStateOf(macro.targetAppLabel) }
     var loopCount by remember(macro) { mutableStateOf(macro.loopCount.toString()) }
     var pollingMs by remember(macro) { mutableStateOf(macro.pollingIntervalMs.toString()) }
+    var injectionMode by remember(macro) { mutableStateOf(macro.injectionMode) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -477,6 +483,21 @@ private fun MacroSettingsDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Text("Pointer Injection Source", style = MaterialTheme.typography.labelMedium, color = ElectricCyan)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    InputInjectionMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = injectionMode == mode,
+                            onClick = { injectionMode = mode },
+                            label = { Text(mode.displayLabel) }
+                        )
+                    }
+                }
+                Text(
+                    text = injectionMode.shortDesc,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
             }
         },
         confirmButton = {
@@ -487,7 +508,8 @@ private fun MacroSettingsDialog(
                             name = name.trim().ifBlank { macro.name },
                             targetAppLabel = target.trim().ifBlank { "Any Screen" },
                             loopCount = loopCount.toIntOrNull() ?: macro.loopCount,
-                            pollingIntervalMs = (pollingMs.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L)
+                            pollingIntervalMs = (pollingMs.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L),
+                            injectionMode = injectionMode
                         )
                     )
                 },

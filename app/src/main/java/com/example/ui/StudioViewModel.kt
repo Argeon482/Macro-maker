@@ -17,6 +17,7 @@ import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
+import com.example.model.InputInjectionMode
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
@@ -264,22 +265,44 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         startForegroundServiceCompat(intent)
     }
 
-    fun testShizukuTapInSandbox(x: Float, y: Float) {
+    fun testShizukuTapInSandbox(
+        x: Float,
+        y: Float,
+        mode: InputInjectionMode = InputInjectionMode.MOUSE
+    ) {
         viewModelScope.launch {
-            val ok = shizukuBridge.tap(x, y, holdMs = 45L, jitterPx = 0)
+            val ok = shizukuBridge.tap(x, y, holdMs = 45L, jitterPx = 0, mode = mode)
             if (ok) {
-                repository.appendLog("sandbox", "Touch Sandbox", "Shizuku Test", "Injected tap at (${x.toInt()}, ${y.toInt()})", LogLevel.SUCCESS)
+                repository.appendLog(
+                    "sandbox",
+                    "Touch Sandbox",
+                    "Shizuku Test",
+                    "Injected ${mode.displayLabel} tap at (${x.toInt()}, ${y.toInt()})",
+                    LogLevel.SUCCESS
+                )
             } else {
                 _notices.tryEmit(UiNotice.Message("Shizuku is not connected. Start Shizuku & grant permission to inject system events.", isError = true))
             }
         }
     }
 
-    fun testShizukuSwipeInSandbox(sx: Float, sy: Float, ex: Float, ey: Float) {
+    fun testShizukuSwipeInSandbox(
+        sx: Float,
+        sy: Float,
+        ex: Float,
+        ey: Float,
+        mode: InputInjectionMode = InputInjectionMode.MOUSE
+    ) {
         viewModelScope.launch {
-            val ok = shizukuBridge.swipe(sx, sy, ex, ey, durationMs = 280L, steps = 16)
+            val ok = shizukuBridge.swipe(sx, sy, ex, ey, durationMs = 280L, steps = 16, mode = mode)
             if (ok) {
-                repository.appendLog("sandbox", "Touch Sandbox", "Shizuku Test", "Injected swipe (${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()})", LogLevel.SUCCESS)
+                repository.appendLog(
+                    "sandbox",
+                    "Touch Sandbox",
+                    "Shizuku Test",
+                    "Injected ${mode.displayLabel} swipe (${sx.toInt()},${sy.toInt()})->(${ex.toInt()},${ey.toInt()})",
+                    LogLevel.SUCCESS
+                )
             } else {
                 _notices.tryEmit(UiNotice.Message("Shizuku is not connected.", isError = true))
             }

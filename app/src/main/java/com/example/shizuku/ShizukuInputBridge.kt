@@ -11,6 +11,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.example.BuildConfig
+import com.example.model.InputInjectionMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,6 +64,9 @@ class ShizukuInputBridge(private val context: Context) {
 
     @Volatile
     private var activeLastY: Float = 0f
+
+    @Volatile
+    private var activeInjectionMode: InputInjectionMode = InputInjectionMode.MOUSE
 
     private val userServiceArgs by lazy {
         Shizuku.UserServiceArgs(
@@ -260,40 +264,46 @@ class ShizukuInputBridge(private val context: Context) {
         }
     }
 
-    suspend fun tap(x: Float, y: Float, holdMs: Long = 35L, jitterPx: Int = 0): Boolean =
-        withContext(Dispatchers.IO) {
-            val service = injectorService ?: return@withContext false
-            val offsetX = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
-            val offsetY = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
-            val tx = (x + offsetX).coerceAtLeast(0f)
-            val ty = (y + offsetY).coerceAtLeast(0f)
+    suspend fun tap(
+        x: Float,
+        y: Float,
+        holdMs: Long = 35L,
+        jitterPx: Int = 0,
+        mode: InputInjectionMode = InputInjectionMode.MOUSE
+    ): Boolean = withContext(Dispatchers.IO) {
+        val service = injectorService ?: return@withContext false
+        val offsetX = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
+        val offsetY = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
+        val tx = (x + offsetX).coerceAtLeast(0f)
+        val ty = (y + offsetY).coerceAtLeast(0f)
 
-            val downTime = SystemClock.uptimeMillis()
-            activeDownTime = downTime
-            activeLastX = tx
-            activeLastY = ty
+        val downTime = SystemClock.uptimeMillis()
+        activeDownTime = downTime
+        activeLastX = tx
+        activeLastY = ty
+        activeInjectionMode = mode
 
-            val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, tx, ty)
-            val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
-            down.recycle()
+        val down = obtainPointerEvent(downTime, downTime, MotionEvent.ACTION_DOWN, tx, ty, mode)
+        val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
+        down.recycle()
 
-            if (!downOk) {
-                activeDownTime = null
-                return@withContext false
-            }
-
-            if (holdMs > 0) {
-                delay(holdMs)
-            }
-
-            val upTime = SystemClock.uptimeMillis()
-            val up = obtainTouchEvent(downTime, upTime, MotionEvent.ACTION_UP, tx, ty)
-            val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
-            up.recycle()
+        if (!downOk) {
             activeDownTime = null
-
-            upOk
+            return@withContext false
         }
+
+        if (holdMs > 0) {
+            delay(holdMs)
+        }
+
+        val upTime = SystemClock.uptimeMillis()
+        val up = obtainPointerEvent(downTime, upTime, MotionEvent.ACTION_UP, tx, ty, mode)
+        val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
+        up.recycle()
+        activeDownTime = null
+
+        upOk
+    }
 
     suspend fun swipe(
         startX: Float,
@@ -301,7 +311,8 @@ class ShizukuInputBridge(private val context: Context) {
         endX: Float,
         endY: Float,
         durationMs: Long = 300L,
-        steps: Int = 18
+        steps: Int = 18,
+        mode: InputInjectionMode = InputInjectionMode.MOUSE
     ): Boolean = withContext(Dispatchers.IO) {
         val service = injectorService ?: return@withContext false
         val safeSteps = steps.coerceIn(4, 120)
@@ -310,8 +321,9 @@ class ShizukuInputBridge(private val context: Context) {
         activeDownTime = downTime
         activeLastX = startX
         activeLastY = startY
+        activeInjectionMode = mode
 
-        val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY)
+        val down = obtainPointerEvent(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY, mode)
         val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
         down.recycle()
         if (!downOk) {
@@ -326,12 +338,13 @@ class ShizukuInputBridge(private val context: Context) {
             val curY = startY + (endY - startY) * t
             activeLastX = curX
             activeLastY = curY
-            val move = obtainTouchEvent(
+            val move = obtainPointerEvent(
                 downTime,
                 SystemClock.uptimeMillis(),
                 MotionEvent.ACTION_MOVE,
                 curX,
-                curY
+                curY,
+                mode
             )
             try {
                 service.injectInputEvent(move, MODE_ASYNC)
@@ -341,7 +354,7 @@ class ShizukuInputBridge(private val context: Context) {
             }
         }
 
-        val up = obtainTouchEvent(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, endX, endY)
+        val up = obtainPointerEvent(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, endX, endY, mode)
         val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
         up.recycle()
         activeDownTime = null
@@ -370,15 +383,17 @@ class ShizukuInputBridge(private val context: Context) {
         val downTime = activeDownTime ?: return
         val lastX = activeLastX
         val lastY = activeLastY
+        val mode = activeInjectionMode
         activeDownTime = null
         val service = injectorService ?: return
         ioScope.launch {
-            val cancel = obtainTouchEvent(
+            val cancel = obtainPointerEvent(
                 downTime,
                 SystemClock.uptimeMillis(),
                 MotionEvent.ACTION_CANCEL,
                 lastX,
-                lastY
+                lastY,
+                mode
             )
             try {
                 service.injectInputEvent(cancel, MODE_ASYNC)
@@ -403,16 +418,62 @@ class ShizukuInputBridge(private val context: Context) {
         } ?: false
     }
 
-    private fun obtainTouchEvent(
+    private fun obtainPointerEvent(
         downTime: Long,
         eventTime: Long,
         action: Int,
         x: Float,
-        y: Float
+        y: Float,
+        mode: InputInjectionMode
     ): MotionEvent {
-        return MotionEvent.obtain(downTime, eventTime, action, x.roundToInt().toFloat(), y.roundToInt().toFloat(), 0).apply {
-            source = InputDevice.SOURCE_TOUCHSCREEN
+        val toolType = when (mode) {
+            InputInjectionMode.MOUSE -> MotionEvent.TOOL_TYPE_MOUSE
+            InputInjectionMode.STYLUS -> MotionEvent.TOOL_TYPE_STYLUS
+            InputInjectionMode.TOUCHSCREEN -> MotionEvent.TOOL_TYPE_FINGER
         }
+        val source = when (mode) {
+            InputInjectionMode.MOUSE -> InputDevice.SOURCE_MOUSE
+            InputInjectionMode.STYLUS -> InputDevice.SOURCE_STYLUS
+            InputInjectionMode.TOUCHSCREEN -> InputDevice.SOURCE_TOUCHSCREEN
+        }
+        val isActivePress = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE
+        val buttonState = if (mode == InputInjectionMode.MOUSE && isActivePress) {
+            MotionEvent.BUTTON_PRIMARY
+        } else {
+            0
+        }
+
+        val props = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                this.toolType = toolType
+            }
+        )
+        val coords = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                this.x = x.roundToInt().toFloat()
+                this.y = y.roundToInt().toFloat()
+                pressure = if (isActivePress) 1.0f else 0.0f
+                size = 1.0f
+            }
+        )
+
+        return MotionEvent.obtain(
+            downTime,
+            eventTime,
+            action,
+            1,
+            props,
+            coords,
+            0,
+            buttonState,
+            1.0f,
+            1.0f,
+            0,
+            0,
+            source,
+            0
+        )
     }
 
     companion object {

@@ -15,6 +15,7 @@ import com.example.engine.MacroInterpreter
 import com.example.model.BranchAction
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
+import com.example.model.InputInjectionMode
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
@@ -216,6 +217,44 @@ class ExampleRobolectricTest {
         val loaded = repo.getMacro("m1")!!.steps.first() as IfImageStep
         assertEquals(140, loaded.searchLeft)
         assertEquals(880, loaded.searchBottom)
+        db.close()
+    }
+
+    @Test
+    fun macro_injectionMode_persistsAndDefaultsCleanly() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val repo = MacroRepository(context, db.macroDao())
+
+        val stylusMacro = MacroDefinition(
+            id = "stylus-1",
+            name = "Game Stylus Flow",
+            injectionMode = InputInjectionMode.STYLUS
+        )
+        repo.saveMacro(stylusMacro)
+
+        val loaded = repo.getMacro("stylus-1")!!
+        assertEquals(InputInjectionMode.STYLUS, loaded.injectionMode)
+
+        val legacyBundleJson = """
+            {
+              "schemaVersion": 1,
+              "exportedAt": 1700000000000,
+              "macros": [
+                {
+                  "id": "legacy-1",
+                  "name": "Legacy Flow",
+                  "steps": []
+                }
+              ]
+            }
+        """.trimIndent()
+        val count = repo.importMacrosFromJson(legacyBundleJson).getOrThrow()
+        assertEquals(1, count)
+        val importedLegacy = repo.macros.first().first { it.name == "Legacy Flow" }
+        assertEquals(InputInjectionMode.MOUSE, importedLegacy.injectionMode)
         db.close()
     }
 }

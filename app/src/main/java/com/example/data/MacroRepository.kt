@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import com.example.model.EmbeddedTemplate
 import com.example.model.IfImageStep
+import com.example.model.InputInjectionMode
 import com.example.model.MacroDefinition
 import com.example.model.MacroExportBundle
 import com.example.model.MacroStep
@@ -217,6 +218,9 @@ class MacroRepository(
         val decodedSteps = runCatching {
             json.decodeFromString<List<MacroStep>>(stepsJson)
         }.getOrDefault(emptyList())
+        val resolvedMode = runCatching {
+            InputInjectionMode.valueOf(injectionMode)
+        }.getOrDefault(InputInjectionMode.MOUSE)
         return MacroDefinition(
             id = id,
             name = name,
@@ -224,6 +228,7 @@ class MacroRepository(
             targetAppLabel = targetAppLabel,
             loopCount = loopCount,
             pollingIntervalMs = pollingIntervalMs,
+            injectionMode = resolvedMode,
             steps = decodedSteps,
             createdAt = createdAt,
             updatedAt = updatedAt
@@ -238,6 +243,7 @@ class MacroRepository(
             targetAppLabel = targetAppLabel,
             loopCount = loopCount,
             pollingIntervalMs = pollingIntervalMs,
+            injectionMode = injectionMode.name,
             stepsJson = json.encodeToString(steps),
             createdAt = createdAt,
             updatedAt = updatedAt

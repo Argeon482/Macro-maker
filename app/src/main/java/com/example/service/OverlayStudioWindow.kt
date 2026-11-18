@@ -87,6 +87,7 @@ import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
+import com.example.model.InputInjectionMode
 import com.example.model.JumpStep
 import com.example.model.KeyPressStep
 import com.example.model.LoopEndStep
@@ -679,6 +680,7 @@ fun OverlayStudioWindow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun OverlayMacroSettings(
     macro: MacroDefinition,
@@ -688,6 +690,7 @@ private fun OverlayMacroSettings(
     var target by remember(macro) { mutableStateOf(macro.targetAppLabel) }
     var loops by remember(macro) { mutableStateOf(macro.loopCount.toString()) }
     var poll by remember(macro) { mutableStateOf(macro.pollingIntervalMs.toString()) }
+    var injectionMode by remember(macro) { mutableStateOf(macro.injectionMode) }
 
     Column(
         modifier = Modifier
@@ -700,6 +703,19 @@ private fun OverlayMacroSettings(
         OverlayTextField("Target App Label", target, { target = it })
         OverlayTextField("Passes (0 = Infinite)", loops, { loops = it.filter(Char::isDigit) }, numeric = true)
         OverlayTextField("Vision Poll (ms)", poll, { poll = it.filter(Char::isDigit) }, numeric = true)
+
+        Text("Pointer Injection Source", color = StudioCyan, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            InputInjectionMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = injectionMode == mode,
+                    onClick = { injectionMode = mode },
+                    label = { Text(mode.displayLabel, fontSize = 12.sp) }
+                )
+            }
+        }
+        Text(injectionMode.shortDesc, color = StudioMuted, fontSize = 11.sp)
+
         Button(
             onClick = {
                 onSave(
@@ -707,7 +723,8 @@ private fun OverlayMacroSettings(
                         name = name.trim().ifBlank { macro.name },
                         targetAppLabel = target.trim().ifBlank { macro.targetAppLabel },
                         loopCount = loops.toIntOrNull() ?: macro.loopCount,
-                        pollingIntervalMs = (poll.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L)
+                        pollingIntervalMs = (poll.toLongOrNull() ?: macro.pollingIntervalMs).coerceAtLeast(50L),
+                        injectionMode = injectionMode
                     )
                 )
             },

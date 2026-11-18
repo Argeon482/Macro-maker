@@ -38,6 +38,13 @@ enum class SystemKeyAction(val keyCode: Int, val displayLabel: String) {
 }
 
 @Serializable
+enum class InputInjectionMode(val displayLabel: String, val shortDesc: String) {
+    MOUSE("Mouse", "Separate pointer stream (avoids finger collision)"),
+    STYLUS("Stylus", "Separate pen stream (Android 13+ / pen apps)"),
+    TOUCHSCREEN("Touch", "Standard finger touch stream")
+}
+
+@Serializable
 sealed interface MacroStep {
     val id: String
     val label: String
@@ -198,6 +205,7 @@ data class MacroDefinition(
     val targetAppLabel: String = "Any Screen",
     val loopCount: Int = 1,
     val pollingIntervalMs: Long = 250L,
+    val injectionMode: InputInjectionMode = InputInjectionMode.MOUSE,
     val steps: List<MacroStep> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
