@@ -15,8 +15,13 @@ import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
 import android.view.WindowManager
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -27,12 +32,20 @@ import com.example.R
 import com.example.ShizuMacroApp
 import com.example.data.LogLevel
 import com.example.engine.ExecutionStatus
+import com.example.model.IfColorStep
+import com.example.model.IfImageStep
+import com.example.model.MacroDefinition
+import com.example.model.MacroStep
+import com.example.model.SwipeStep
+import com.example.model.TapStep
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 class MacroOverlayService : Service() {
 
@@ -45,9 +58,18 @@ class MacroOverlayService : Service() {
     private var dockParams: WindowManager.LayoutParams? = null
     private var dockLifecycle: OverlayLifecycleOwner? = null
 
+    private var pinsView: ComposeView? = null
+    private var pinsLifecycle: OverlayLifecycleOwner? = null
+
+    private var studioView: ComposeView? = null
+    private var studioLifecycle: OverlayLifecycleOwner? = null
+
     private var pickerView: ComposeView? = null
-    private var pickerParams: WindowManager.LayoutParams? = null
     private var pickerLifecycle: OverlayLifecycleOwner? = null
+
+    private var passThroughView: ComposeView? = null
+    private var passThroughParams: WindowManager.LayoutParams? = null
+    private var passThroughLifecycle: OverlayLifecycleOwner? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -58,11 +80,30 @@ class MacroOverlayService : Service() {
 
         serviceScope.launch {
             app.overlayCoordinator.overlayState.collect { uiState ->
-                if (uiState.pickerMode != PickerMode.NONE && uiState.pendingPickerRequest != null) {
-                    showPickerOverlay()
-                    updatePickerLayoutMode(uiState.isPickerPassThrough)
+                val pickerActive = uiState.pickerMode != PickerMode.NONE && uiState.pendingPickerRequest != null
+                if (pickerActive) {
+                    if (uiState.isPickerPassThrough) {
+                        removePickerOverlay()
+                        showPassThroughOverlay()
+                    } else {
+                        removePassThroughOverlay()
+                        showPickerOverlay()
+                    }
                 } else {
+                    removePassThroughOverlay()
                     removePickerOverlay()
+                }
+
+                if (!pickerActive && uiState.showPinsOverlay && !uiState.activeMacroId.isNullOrBlank()) {
+                    showPinsOverlay()
+                } else {
+                    removePinsOverlay()
+                }
+
+                if (!pickerActive && uiState.showOverlayStudio) {
+                    showStudioOverlay()
+                } else {
+                    removeStudioOverlay()
                 }
             }
         }
@@ -91,7 +132,14 @@ class MacroOverlayService : Service() {
 
             ACTION_START_PICKER -> {
                 showDockOverlay()
-                showPickerOverlay()
+                val uiState = app.overlayCoordinator.overlayState.value
+                if (uiState.pickerMode != PickerMode.NONE && uiState.pendingPickerRequest != null) {
+                    if (uiState.isPickerPassThrough) {
+                        showPassThroughOverlay()
+                    } else {
+                        showPickerOverlay()
+                    }
+                }
             }
 
             ACTION_SHOW_DOCK -> {
@@ -108,7 +156,10 @@ class MacroOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        removePassThroughOverlay()
         removePickerOverlay()
+        removeStudioOverlay()
+        removePinsOverlay()
         removeDockOverlay()
         serviceScope.cancel()
         app.overlayCoordinator.setOverlayShowing(false)
@@ -116,6 +167,13 @@ class MacroOverlayService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun overlayLayoutType(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+    } else {
+        @Suppress("DEPRECATION")
+        WindowManager.LayoutParams.TYPE_PHONE
+    }
 
     private fun startForegroundCompat(withMediaProjection: Boolean) {
         val notification = buildNotification()
@@ -138,17 +196,10 @@ class MacroOverlayService : Service() {
     private fun showDockOverlay() {
         if (dockView != null) return
 
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
+            overlayLayoutType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -185,32 +236,58 @@ class MacroOverlayService : Service() {
                         if (currentStatus == ExecutionStatus.RUNNING || currentStatus == ExecutionStatus.PAUSED) {
                             app.interpreter.pauseOrResume()
                         } else {
-                            val macroId = app.overlayCoordinator.overlayState.value.activeMacroId
-                            if (macroId != null) {
-                                serviceScope.launch {
-                                    val macro = app.repository.getMacro(macroId)
-                                    if (macro != null) {
-                                        app.interpreter.start(macro)
-                                    }
+                            serviceScope.launch {
+                                val macro = resolveActiveMacro()
+                                if (macro != null) {
+                                    app.overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+                                    app.interpreter.start(macro)
                                 }
                             }
                         }
                     },
                     onStop = { app.interpreter.stop() },
                     onQuickPick = {
-                        val macroId = app.overlayCoordinator.overlayState.value.activeMacroId ?: ""
-                        app.overlayCoordinator.startPicker(
-                            PickerRequest(
-                                macroId = macroId,
-                                stepId = "",
-                                mode = PickerMode.PICK_TAP
+                        serviceScope.launch {
+                            val macro = ensureActiveMacro()
+                            val tapSteps = macro.steps.filterIsInstance<TapStep>()
+                            val targetTap = if (tapSteps.size == 1) tapSteps.first() else null
+                            app.overlayCoordinator.startPicker(
+                                PickerRequest(
+                                    macroId = macro.id,
+                                    stepId = targetTap?.id ?: "",
+                                    mode = PickerMode.PICK_TAP,
+                                    initialX = targetTap?.x ?: 540f,
+                                    initialY = targetTap?.y ?: 960f,
+                                    returnToAppOnComplete = false
+                                )
                             )
-                        )
+                        }
+                    },
+                    onTogglePins = {
+                        serviceScope.launch {
+                            val macro = ensureActiveMacro()
+                            app.overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+                            val currentlyOpen = app.overlayCoordinator.overlayState.value.showPinsOverlay
+                            app.overlayCoordinator.setPinsOverlayOpen(!currentlyOpen)
+                        }
+                    },
+                    onOpenOverlayStudio = {
+                        serviceScope.launch {
+                            val macro = ensureActiveMacro()
+                            app.overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+                            val currentlyOpen = app.overlayCoordinator.overlayState.value.showOverlayStudio
+                            app.overlayCoordinator.setOverlayStudioOpen(!currentlyOpen)
+                        }
                     },
                     onOpenApp = { bringMainActivityToFront() },
                     onCloseOverlay = {
                         app.interpreter.stop()
+                        app.overlayCoordinator.cancelPicker()
                         app.overlayCoordinator.setOverlayShowing(false)
+                        removePassThroughOverlay()
+                        removePickerOverlay()
+                        removeStudioOverlay()
+                        removePinsOverlay()
                         removeDockOverlay()
                         stopSelf()
                     }
@@ -225,30 +302,163 @@ class MacroOverlayService : Service() {
     }
 
     private fun removeDockOverlay() {
-        dockView?.let { v ->
-            runCatching { windowManager.removeView(v) }
-        }
+        dockView?.let { v -> runCatching { windowManager.removeView(v) } }
         dockLifecycle?.onDestroy()
         dockView = null
         dockLifecycle = null
         dockParams = null
     }
 
-    private fun showPickerOverlay() {
-        if (pickerView != null) return
-        val request = app.overlayCoordinator.overlayState.value.pendingPickerRequest ?: return
-
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+    private fun showPinsOverlay() {
+        if (pinsView != null) return
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            layoutType,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+
+        val lifecycleOwner = OverlayLifecycleOwner().apply { onCreate() }
+        val view = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(lifecycleOwner)
+            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            setViewTreeViewModelStoreOwner(lifecycleOwner)
+            setContent {
+                val overlayState by app.overlayCoordinator.overlayState.collectAsState()
+                val macroId = overlayState.activeMacroId ?: ""
+                val macroFlow = remember(macroId) { app.repository.observeMacro(macroId) }
+                val macro by macroFlow.collectAsState(initial = null)
+
+                macro?.let { currentMacro ->
+                    MacroPinsOverlay(
+                        macro = currentMacro,
+                        onUpdateMacro = { updated ->
+                            serviceScope.launch { app.repository.saveMacro(updated) }
+                        },
+                        onEditStep = { step ->
+                            app.overlayCoordinator.setOverlayStudioOpen(true, editingStepId = step.id)
+                        },
+                        onDone = {
+                            app.overlayCoordinator.setPinsOverlayOpen(false)
+                        }
+                    )
+                }
+            }
+        }
+
+        pinsLifecycle = lifecycleOwner
+        pinsView = view
+        runCatching { windowManager.addView(view, params) }
+    }
+
+    private fun removePinsOverlay() {
+        pinsView?.let { v -> runCatching { windowManager.removeView(v) } }
+        pinsLifecycle?.onDestroy()
+        pinsView = null
+        pinsLifecycle = null
+    }
+
+    private fun showStudioOverlay() {
+        if (studioView != null) return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            @Suppress("DEPRECATION")
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+
+        val lifecycleOwner = OverlayLifecycleOwner().apply { onCreate() }
+        val view = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(lifecycleOwner)
+            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            setViewTreeViewModelStoreOwner(lifecycleOwner)
+            setContent {
+                val overlayState by app.overlayCoordinator.overlayState.collectAsState()
+                val macros by app.repository.macros.collectAsState(initial = emptyList())
+                val templates by app.repository.templates.collectAsState(initial = emptyList())
+                val captureActive by app.screenDetector.isActive.collectAsState()
+
+                val activeMacro = macros.find { it.id == overlayState.activeMacroId } ?: macros.firstOrNull()
+
+                OverlayStudioWindow(
+                    macros = macros,
+                    activeMacro = activeMacro,
+                    initialEditingStepId = overlayState.studioEditingStepId,
+                    templates = templates,
+                    screenCaptureActive = captureActive,
+                    onSelectMacro = { selected ->
+                        app.overlayCoordinator.setLoadedMacro(selected.id, selected.name)
+                    },
+                    onCreateMacro = { name ->
+                        serviceScope.launch {
+                            val created = MacroDefinition(
+                                id = UUID.randomUUID().toString(),
+                                name = name,
+                                steps = listOf(TapStep(label = "Initial Tap", x = 540f, y = 960f))
+                            )
+                            app.repository.saveMacro(created)
+                            app.overlayCoordinator.setLoadedMacro(created.id, created.name)
+                        }
+                    },
+                    onUpdateMacro = { updated ->
+                        serviceScope.launch {
+                            app.repository.saveMacro(updated)
+                            app.overlayCoordinator.setLoadedMacro(updated.id, updated.name)
+                        }
+                    },
+                    onLaunchPicker = { macro, step, mode ->
+                        val request = buildPickerRequest(
+                            macroId = macro.id,
+                            step = step,
+                            mode = mode,
+                            returnToAppOnComplete = false
+                        )
+                        app.overlayCoordinator.startPicker(request)
+                    },
+                    onOpenPins = {
+                        app.overlayCoordinator.setPinsOverlayOpen(true)
+                    },
+                    onRequestVision = {
+                        requestVisionConsent()
+                    },
+                    onRunMacro = { macro ->
+                        app.overlayCoordinator.setLoadedMacro(macro.id, macro.name)
+                        app.interpreter.start(macro)
+                    },
+                    onClose = {
+                        app.overlayCoordinator.setOverlayStudioOpen(false)
+                    }
+                )
+            }
+        }
+
+        studioLifecycle = lifecycleOwner
+        studioView = view
+        runCatching { windowManager.addView(view, params) }
+    }
+
+    private fun removeStudioOverlay() {
+        studioView?.let { v -> runCatching { windowManager.removeView(v) } }
+        studioLifecycle?.onDestroy()
+        studioView = null
+        studioLifecycle = null
+    }
+
+    private fun showPickerOverlay() {
+        if (pickerView != null) return
+        if (app.overlayCoordinator.overlayState.value.pendingPickerRequest == null) return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayLayoutType(),
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
@@ -261,138 +471,391 @@ class MacroOverlayService : Service() {
             setContent {
                 val captureActive by app.screenDetector.isActive.collectAsState()
                 val overlayState by app.overlayCoordinator.overlayState.collectAsState()
-                TargetPickerOverlay(
-                    request = request,
-                    screenCaptureActive = captureActive,
-                    isPassThrough = overlayState.isPickerPassThrough,
-                    onTogglePassThrough = { passThrough ->
-                        app.overlayCoordinator.setPickerPassThrough(passThrough)
-                    },
-                    onConfirmTap = { x, y ->
-                        app.overlayCoordinator.publishPickerResult(
-                            PickerResult.TapPicked(request.macroId, request.stepId, x, y)
-                        )
-                        removePickerOverlay()
-                        if (request.stepId.isNotBlank()) bringMainActivityToFront()
-                    },
-                    onConfirmSwipe = { sx, sy, ex, ey ->
-                        app.overlayCoordinator.publishPickerResult(
-                            PickerResult.SwipePicked(request.macroId, request.stepId, sx, sy, ex, ey)
-                        )
-                        removePickerOverlay()
-                        if (request.stepId.isNotBlank()) bringMainActivityToFront()
-                    },
-                    onConfirmColor = { x, y ->
-                        serviceScope.launch {
-                            // Hide picker momentarily so we sample the actual screen underneath
-                            removePickerOverlay()
-                            delay(130L)
-                            val frame = app.screenDetector.captureLatestBitmap()
-                            val hex = if (frame != null) {
-                                val safeX = x.coerceIn(0, frame.width - 1)
-                                val safeY = y.coerceIn(0, frame.height - 1)
-                                val pixel = frame.getPixel(safeX, safeY)
-                                frame.recycle()
-                                String.format("#%06X", 0xFFFFFF and pixel)
-                            } else {
-                                "#10B981"
-                            }
-                            app.overlayCoordinator.publishPickerResult(
-                                PickerResult.ColorPicked(request.macroId, request.stepId, x, y, hex)
-                            )
-                            if (request.stepId.isNotBlank()) bringMainActivityToFront()
+                val req = overlayState.pendingPickerRequest
+
+                if (req != null) {
+                    val macroFlow = remember(req.macroId) { app.repository.observeMacro(req.macroId) }
+                    val macro by macroFlow.collectAsState(initial = null)
+                    val targetSubtitle = remember(macro, req.stepId, req.mode) {
+                        if (req.stepId.isBlank()) {
+                            "Creates new Tap step in ${macro?.name ?: overlayState.activeMacroName}"
+                        } else {
+                            val idx = macro?.steps?.indexOfFirst { it.id == req.stepId } ?: -1
+                            val step = macro?.steps?.getOrNull(idx)
+                            if (step != null) "Updating #${idx + 1} ${step.label}" else null
                         }
-                    },
-                    onConfirmCrop = { left, top, right, bottom ->
-                        serviceScope.launch {
-                            removePickerOverlay()
-                            delay(130L)
-                            val frame = app.screenDetector.captureLatestBitmap()
-                            val rect = Rect(left, top, right, bottom)
-                            if (frame != null) {
-                                val safeL = left.coerceIn(0, frame.width - 2)
-                                val safeT = top.coerceIn(0, frame.height - 2)
-                                val safeW = (right - safeL).coerceIn(8, frame.width - safeL)
-                                val safeH = (bottom - safeT).coerceIn(8, frame.height - safeT)
-                                val cropped = Bitmap.createBitmap(frame, safeL, safeT, safeW, safeH)
-                                frame.recycle()
-                                val saved = app.repository.saveTemplateBitmap(
-                                    "Crop ${safeW}x${safeH}",
-                                    cropped
-                                )
-                                cropped.recycle()
-                                app.overlayCoordinator.publishPickerResult(
+                    }
+
+                    TargetPickerOverlay(
+                        request = req,
+                        screenCaptureActive = captureActive,
+                        targetSubtitle = targetSubtitle,
+                        onSwitchApp = { updatedDraft ->
+                            app.overlayCoordinator.updatePendingPickerRequest(updatedDraft)
+                            app.overlayCoordinator.setPickerPassThrough(true)
+                        },
+                        onConfirmTap = { x, y ->
+                            serviceScope.launch {
+                                val result = PickerResult.TapPicked(req.macroId, req.stepId, x, y)
+                                val savedStepId = persistPickerResult(result)
+                                app.overlayCoordinator.publishPickerResult(result)
+                                handlePostPickNavigation(req, savedStepId)
+                            }
+                        },
+                        onConfirmSwipe = { sx, sy, ex, ey ->
+                            serviceScope.launch {
+                                val result = PickerResult.SwipePicked(req.macroId, req.stepId, sx, sy, ex, ey)
+                                val savedStepId = persistPickerResult(result)
+                                app.overlayCoordinator.publishPickerResult(result)
+                                handlePostPickNavigation(req, savedStepId)
+                            }
+                        },
+                        onConfirmColor = { x, y ->
+                            serviceScope.launch {
+                                removePickerOverlay()
+                                delay(140L)
+                                val frame = app.screenDetector.captureLatestBitmap()
+                                val hex = if (frame != null) {
+                                    val safeX = x.coerceIn(0, frame.width - 1)
+                                    val safeY = y.coerceIn(0, frame.height - 1)
+                                    val pixel = frame.getPixel(safeX, safeY)
+                                    frame.recycle()
+                                    String.format("#%06X", 0xFFFFFF and pixel)
+                                } else {
+                                    "#10B981"
+                                }
+                                val result = PickerResult.ColorPicked(req.macroId, req.stepId, x, y, hex)
+                                val savedStepId = persistPickerResult(result)
+                                app.overlayCoordinator.publishPickerResult(result)
+                                handlePostPickNavigation(req, savedStepId)
+                            }
+                        },
+                        onConfirmCrop = { left, top, right, bottom ->
+                            serviceScope.launch {
+                                removePickerOverlay()
+                                delay(140L)
+                                val frame = app.screenDetector.captureLatestBitmap()
+                                val rect = Rect(left, top, right, bottom)
+                                val result = if (frame != null) {
+                                    val safeL = left.coerceIn(0, (frame.width - 2).coerceAtLeast(0))
+                                    val safeT = top.coerceIn(0, (frame.height - 2).coerceAtLeast(0))
+                                    val safeW = (right - safeL).coerceIn(8, (frame.width - safeL).coerceAtLeast(8))
+                                    val safeH = (bottom - safeT).coerceIn(8, (frame.height - safeT).coerceAtLeast(8))
+                                    val cropped = Bitmap.createBitmap(frame, safeL, safeT, safeW, safeH)
+                                    frame.recycle()
+                                    val saved = app.repository.saveTemplateBitmap(
+                                        "Crop ${safeW}x${safeH}",
+                                        cropped
+                                    )
+                                    cropped.recycle()
                                     PickerResult.TemplatePicked(
-                                        macroId = request.macroId,
-                                        stepId = request.stepId,
+                                        macroId = req.macroId,
+                                        stepId = req.stepId,
                                         templateId = saved.id,
                                         templateName = saved.name,
                                         region = Rect(safeL, safeT, safeL + safeW, safeT + safeH)
                                     )
-                                )
-                            } else {
-                                app.repository.appendLog(
-                                    request.macroId,
-                                    "Picker",
-                                    "Crop",
-                                    "Screen capture was inactive; saved region bounds only.",
-                                    LogLevel.WARN
-                                )
-                                app.overlayCoordinator.publishPickerResult(
+                                } else {
+                                    app.repository.appendLog(
+                                        req.macroId,
+                                        "Picker",
+                                        "Crop",
+                                        "Screen capture was inactive; saved region bounds only.",
+                                        LogLevel.WARN
+                                    )
                                     PickerResult.TemplatePicked(
-                                        macroId = request.macroId,
-                                        stepId = request.stepId,
+                                        macroId = req.macroId,
+                                        stepId = req.stepId,
                                         templateId = "",
                                         templateName = "No Capture Active",
                                         region = rect
                                     )
-                                )
+                                }
+                                val savedStepId = persistPickerResult(result)
+                                app.overlayCoordinator.publishPickerResult(result)
+                                handlePostPickNavigation(req, savedStepId)
                             }
-                            if (request.stepId.isNotBlank()) bringMainActivityToFront()
+                        },
+                        onConfirmRoi = { left, top, right, bottom ->
+                            serviceScope.launch {
+                                val result = PickerResult.RoiPicked(
+                                    macroId = req.macroId,
+                                    stepId = req.stepId,
+                                    region = Rect(left, top, right, bottom)
+                                )
+                                val savedStepId = persistPickerResult(result)
+                                app.overlayCoordinator.publishPickerResult(result)
+                                handlePostPickNavigation(req, savedStepId)
+                            }
+                        },
+                        onCancel = {
+                            app.overlayCoordinator.cancelPicker()
+                            handlePostPickNavigation(req, req.stepId.takeIf { it.isNotBlank() })
                         }
-                    },
-                    onCancel = {
-                        app.overlayCoordinator.cancelPicker()
-                        removePickerOverlay()
-                        if (request.stepId.isNotBlank()) bringMainActivityToFront()
-                    }
-                )
+                    )
+                }
             }
         }
 
-        pickerParams = params
         pickerLifecycle = lifecycleOwner
         pickerView = view
         runCatching { windowManager.addView(view, params) }
     }
 
-    private fun updatePickerLayoutMode(passThrough: Boolean) {
-        val view = pickerView ?: return
-        val params = pickerParams ?: return
-        if (passThrough) {
-            params.width = WindowManager.LayoutParams.WRAP_CONTENT
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT
-            params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            params.y = 140
-            params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        } else {
-            params.width = WindowManager.LayoutParams.MATCH_PARENT
-            params.height = WindowManager.LayoutParams.MATCH_PARENT
-            params.gravity = Gravity.TOP or Gravity.START
-            params.y = 0
-            params.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        }
-        runCatching { windowManager.updateViewLayout(view, params) }
-    }
-
     private fun removePickerOverlay() {
-        pickerView?.let { v ->
-            runCatching { windowManager.removeView(v) }
-        }
+        pickerView?.let { v -> runCatching { windowManager.removeView(v) } }
         pickerLifecycle?.onDestroy()
         pickerView = null
-        pickerParams = null
         pickerLifecycle = null
+    }
+
+    private fun showPassThroughOverlay() {
+        if (passThroughView != null) return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 120
+            y = 140
+        }
+
+        val lifecycleOwner = OverlayLifecycleOwner().apply { onCreate() }
+        val view = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(lifecycleOwner)
+            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            setViewTreeViewModelStoreOwner(lifecycleOwner)
+            setContent {
+                Box(modifier = Modifier, contentAlignment = Alignment.Center) {
+                    PassThroughOverlayChip(
+                        onDragDelta = { dx, dy ->
+                            passThroughParams?.let { p ->
+                                p.x += dx
+                                p.y += dy
+                                runCatching { windowManager.updateViewLayout(this@apply, p) }
+                            }
+                        },
+                        onResumePicker = {
+                            app.overlayCoordinator.setPickerPassThrough(false)
+                        },
+                        onCancel = {
+                            val req = app.overlayCoordinator.overlayState.value.pendingPickerRequest
+                            app.overlayCoordinator.cancelPicker()
+                            if (req != null) {
+                                handlePostPickNavigation(req, req.stepId.takeIf { it.isNotBlank() })
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        passThroughParams = params
+        passThroughLifecycle = lifecycleOwner
+        passThroughView = view
+        runCatching { windowManager.addView(view, params) }
+    }
+
+    private fun removePassThroughOverlay() {
+        passThroughView?.let { v -> runCatching { windowManager.removeView(v) } }
+        passThroughLifecycle?.onDestroy()
+        passThroughView = null
+        passThroughParams = null
+        passThroughLifecycle = null
+    }
+
+    private suspend fun resolveActiveMacro(): MacroDefinition? {
+        val activeId = app.overlayCoordinator.overlayState.value.activeMacroId
+        if (!activeId.isNullOrBlank()) {
+            app.repository.getMacro(activeId)?.let { return it }
+        }
+        return app.repository.macros.first().firstOrNull()
+    }
+
+    private suspend fun ensureActiveMacro(): MacroDefinition {
+        resolveActiveMacro()?.let { return it }
+        val created = MacroDefinition(
+            id = UUID.randomUUID().toString(),
+            name = "Overlay Macro",
+            steps = emptyList()
+        )
+        app.repository.saveMacro(created)
+        app.overlayCoordinator.setLoadedMacro(created.id, created.name)
+        return created
+    }
+
+    private suspend fun persistPickerResult(result: PickerResult): String? {
+        val macro = if (result.macroId.isNotBlank()) {
+            app.repository.getMacro(result.macroId) ?: ensureActiveMacro()
+        } else {
+            ensureActiveMacro()
+        }
+
+        if (result.stepId.isBlank()) {
+            val newStep: MacroStep = when (result) {
+                is PickerResult.TapPicked -> TapStep(
+                    label = "Tap #${macro.steps.size + 1}",
+                    x = result.x,
+                    y = result.y
+                )
+                is PickerResult.SwipePicked -> SwipeStep(
+                    label = "Swipe #${macro.steps.size + 1}",
+                    startX = result.startX,
+                    startY = result.startY,
+                    endX = result.endX,
+                    endY = result.endY
+                )
+                is PickerResult.ColorPicked -> IfColorStep(
+                    label = "Color #${macro.steps.size + 1}",
+                    x = result.x,
+                    y = result.y,
+                    targetHexColor = result.hexColor
+                )
+                is PickerResult.TemplatePicked -> IfImageStep(
+                    label = "Image #${macro.steps.size + 1}",
+                    templateId = result.templateId,
+                    templateName = result.templateName,
+                    searchLeft = (result.region.left - 32).coerceAtLeast(0),
+                    searchTop = (result.region.top - 32).coerceAtLeast(0),
+                    searchRight = result.region.right + 32,
+                    searchBottom = result.region.bottom + 32
+                )
+                is PickerResult.RoiPicked -> IfImageStep(
+                    label = "Image #${macro.steps.size + 1}",
+                    searchLeft = result.region.left,
+                    searchTop = result.region.top,
+                    searchRight = result.region.right,
+                    searchBottom = result.region.bottom
+                )
+            }
+            val updatedMacro = macro.copy(steps = macro.steps + newStep)
+            app.repository.saveMacro(updatedMacro)
+            app.overlayCoordinator.setLoadedMacro(updatedMacro.id, updatedMacro.name)
+            return newStep.id
+        }
+
+        var matched = false
+        val updatedSteps = macro.steps.map { step ->
+            if (step.id != result.stepId) return@map step
+            matched = true
+            when (result) {
+                is PickerResult.TapPicked -> if (step is TapStep) {
+                    step.copy(x = result.x, y = result.y)
+                } else step
+
+                is PickerResult.SwipePicked -> if (step is SwipeStep) {
+                    step.copy(
+                        startX = result.startX,
+                        startY = result.startY,
+                        endX = result.endX,
+                        endY = result.endY
+                    )
+                } else step
+
+                is PickerResult.ColorPicked -> if (step is IfColorStep) {
+                    step.copy(x = result.x, y = result.y, targetHexColor = result.hexColor)
+                } else step
+
+                is PickerResult.TemplatePicked -> if (step is IfImageStep) {
+                    val hasExistingRoi = step.searchRight > step.searchLeft && step.searchBottom > step.searchTop
+                    step.copy(
+                        templateId = result.templateId.ifBlank { step.templateId },
+                        templateName = result.templateName,
+                        searchLeft = if (hasExistingRoi) step.searchLeft else (result.region.left - 32).coerceAtLeast(0),
+                        searchTop = if (hasExistingRoi) step.searchTop else (result.region.top - 32).coerceAtLeast(0),
+                        searchRight = if (hasExistingRoi) step.searchRight else result.region.right + 32,
+                        searchBottom = if (hasExistingRoi) step.searchBottom else result.region.bottom + 32
+                    )
+                } else step
+
+                is PickerResult.RoiPicked -> if (step is IfImageStep) {
+                    step.copy(
+                        searchLeft = result.region.left,
+                        searchTop = result.region.top,
+                        searchRight = result.region.right,
+                        searchBottom = result.region.bottom
+                    )
+                } else step
+            }
+        }
+
+        if (matched) {
+            val updatedMacro = macro.copy(steps = updatedSteps)
+            app.repository.saveMacro(updatedMacro)
+            app.overlayCoordinator.setLoadedMacro(updatedMacro.id, updatedMacro.name)
+        }
+        return result.stepId
+    }
+
+    private fun handlePostPickNavigation(request: PickerRequest, savedStepId: String?) {
+        if (request.returnToAppOnComplete) {
+            bringMainActivityToFront()
+        } else if (!savedStepId.isNullOrBlank() && request.stepId.isNotBlank()) {
+            app.overlayCoordinator.setOverlayStudioOpen(true, editingStepId = savedStepId)
+        }
+    }
+
+    private fun buildPickerRequest(
+        macroId: String,
+        step: MacroStep,
+        mode: PickerMode,
+        returnToAppOnComplete: Boolean
+    ): PickerRequest = when (step) {
+        is TapStep -> PickerRequest(
+            macroId = macroId,
+            stepId = step.id,
+            mode = mode,
+            initialX = step.x,
+            initialY = step.y,
+            returnToAppOnComplete = returnToAppOnComplete
+        )
+        is SwipeStep -> PickerRequest(
+            macroId = macroId,
+            stepId = step.id,
+            mode = mode,
+            initialX = step.startX,
+            initialY = step.startY,
+            initialEndX = step.endX,
+            initialEndY = step.endY,
+            returnToAppOnComplete = returnToAppOnComplete
+        )
+        is IfColorStep -> PickerRequest(
+            macroId = macroId,
+            stepId = step.id,
+            mode = mode,
+            initialX = step.x.toFloat(),
+            initialY = step.y.toFloat(),
+            returnToAppOnComplete = returnToAppOnComplete
+        )
+        is IfImageStep -> PickerRequest(
+            macroId = macroId,
+            stepId = step.id,
+            mode = mode,
+            initialLeft = step.searchLeft,
+            initialTop = step.searchTop,
+            initialRight = step.searchRight,
+            initialBottom = step.searchBottom,
+            returnToAppOnComplete = returnToAppOnComplete
+        )
+        else -> PickerRequest(
+            macroId = macroId,
+            stepId = step.id,
+            mode = mode,
+            returnToAppOnComplete = returnToAppOnComplete
+        )
+    }
+
+    private fun requestVisionConsent() {
+        app.overlayCoordinator.setOverlayStudioOpen(false)
+        app.overlayCoordinator.setPinsOverlayOpen(false)
+        val intent = Intent(this, ProjectionRequestActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
     }
 
     private fun bringMainActivityToFront() {

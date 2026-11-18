@@ -13,6 +13,7 @@ import com.example.data.MacroRepository
 import com.example.engine.ExecutionStatus
 import com.example.engine.MacroInterpreter
 import com.example.model.BranchAction
+import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
@@ -20,6 +21,10 @@ import com.example.model.MacroDefinition
 import com.example.model.SetVariableStep
 import com.example.model.VarComparator
 import com.example.model.VarOperation
+import com.example.service.OverlayCoordinator
+import com.example.service.PickerMode
+import com.example.service.PickerRequest
+import com.example.service.PickerResult
 import com.example.shizuku.ShizukuInputBridge
 import com.example.vision.ScreenDetector
 import kotlinx.coroutines.delay
@@ -147,6 +152,70 @@ class ExampleRobolectricTest {
         assertEquals(ExecutionStatus.IDLE, finalState.status)
         assertEquals("20", finalState.variables["score"])
         assertEquals("true", finalState.variables["verified"])
+        db.close()
+    }
+
+    @Test
+    fun overlayCoordinator_preservesPickerDraftAndRoiState() = runBlocking {
+        val coordinator = OverlayCoordinator()
+        coordinator.setOverlayShowing(true, "m1", "Macro 1")
+        coordinator.setOverlayStudioOpen(true, editingStepId = "step-img")
+        assertTrue(coordinator.overlayState.value.showOverlayStudio)
+        assertEquals("step-img", coordinator.overlayState.value.studioEditingStepId)
+
+        val initialReq = PickerRequest(
+            macroId = "m1",
+            stepId = "step-img",
+            mode = PickerMode.PICK_SEARCH_ROI,
+            initialLeft = 100,
+            initialTop = 200,
+            initialRight = 500,
+            initialBottom = 700
+        )
+        coordinator.startPicker(initialReq)
+        assertEquals(PickerMode.PICK_SEARCH_ROI, coordinator.overlayState.value.pickerMode)
+        assertEquals(false, coordinator.overlayState.value.showOverlayStudio)
+
+        // Simulate user dragging handles then tapping Switch App
+        val draggedReq = initialReq.copy(initialLeft = 140, initialTop = 260, initialRight = 620, initialBottom = 880)
+        coordinator.updatePendingPickerRequest(draggedReq)
+        coordinator.setPickerPassThrough(true)
+        assertTrue(coordinator.overlayState.value.isPickerPassThrough)
+        assertEquals(620, coordinator.overlayState.value.pendingPickerRequest?.initialRight)
+
+        // Returning to Place Target preserves dragged bounds
+        coordinator.setPickerPassThrough(false)
+        assertEquals(140, coordinator.overlayState.value.pendingPickerRequest?.initialLeft)
+
+        coordinator.publishPickerResult(PickerResult.RoiPicked("m1", "step-img", Rect(140, 260, 620, 880)))
+        assertEquals(PickerMode.NONE, coordinator.overlayState.value.pickerMode)
+
+        // Verify IfImageStep ROI survives repository save/load
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val repo = MacroRepository(context, db.macroDao())
+        repo.saveMacro(
+            MacroDefinition(
+                id = "m1",
+                name = "Vision Macro",
+                steps = listOf(
+                    IfImageStep(
+                        id = "step-img",
+                        templateId = "tpl-1",
+                        templateName = "Button",
+                        searchLeft = 140,
+                        searchTop = 260,
+                        searchRight = 620,
+                        searchBottom = 880
+                    )
+                )
+            )
+        )
+        val loaded = repo.getMacro("m1")!!.steps.first() as IfImageStep
+        assertEquals(140, loaded.searchLeft)
+        assertEquals(880, loaded.searchBottom)
         db.close()
     }
 }

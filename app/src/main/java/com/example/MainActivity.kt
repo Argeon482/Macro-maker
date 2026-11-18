@@ -368,12 +368,12 @@ private fun ShizuMacroRoot(
                                     }
                                 },
                                 onRunNow = { m -> viewModel.runMacroDirectly(m) },
-                                onPickOnScreen = { m, step ->
+                                onPickOnScreen = { m, step, mode ->
                                     requestNotificationPermissionIfNeeded()
                                     if (!viewModel.canDrawOverlays()) {
                                         openOverlayPermissionSettings()
                                     } else {
-                                        viewModel.startScreenPicker(m, step)
+                                        viewModel.startScreenPicker(m, step, mode)
                                     }
                                 },
                                 onExportJson = { m -> triggerExport(m) }

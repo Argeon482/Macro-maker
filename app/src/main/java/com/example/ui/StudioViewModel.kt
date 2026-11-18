@@ -208,24 +208,52 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _notices.tryEmit(UiNotice.Message("Screen capture stopped"))
     }
 
-    fun startScreenPicker(macro: MacroDefinition, step: MacroStep) {
+    fun startScreenPicker(
+        macro: MacroDefinition,
+        step: MacroStep,
+        modeOverride: PickerMode? = null
+    ) {
         if (!canDrawOverlays()) {
             _notices.tryEmit(UiNotice.Message("Grant 'Display over other apps' to use the visual picker.", isError = true))
             return
         }
         val request = when (step) {
-            is TapStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_TAP, step.x, step.y)
-            is SwipeStep -> PickerRequest(
-                macro.id,
-                step.id,
-                PickerMode.PICK_SWIPE,
-                step.startX,
-                step.startY,
-                step.endX,
-                step.endY
+            is TapStep -> PickerRequest(
+                macroId = macro.id,
+                stepId = step.id,
+                mode = modeOverride ?: PickerMode.PICK_TAP,
+                initialX = step.x,
+                initialY = step.y,
+                returnToAppOnComplete = true
             )
-            is IfColorStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_COLOR, step.x.toFloat(), step.y.toFloat())
-            is IfImageStep -> PickerRequest(macro.id, step.id, PickerMode.PICK_TEMPLATE_CROP)
+            is SwipeStep -> PickerRequest(
+                macroId = macro.id,
+                stepId = step.id,
+                mode = modeOverride ?: PickerMode.PICK_SWIPE,
+                initialX = step.startX,
+                initialY = step.startY,
+                initialEndX = step.endX,
+                initialEndY = step.endY,
+                returnToAppOnComplete = true
+            )
+            is IfColorStep -> PickerRequest(
+                macroId = macro.id,
+                stepId = step.id,
+                mode = modeOverride ?: PickerMode.PICK_COLOR,
+                initialX = step.x.toFloat(),
+                initialY = step.y.toFloat(),
+                returnToAppOnComplete = true
+            )
+            is IfImageStep -> PickerRequest(
+                macroId = macro.id,
+                stepId = step.id,
+                mode = modeOverride ?: PickerMode.PICK_TEMPLATE_CROP,
+                initialLeft = step.searchLeft,
+                initialTop = step.searchTop,
+                initialRight = step.searchRight,
+                initialBottom = step.searchBottom,
+                returnToAppOnComplete = true
+            )
             else -> return
         }
         overlayCoordinator.setLoadedMacro(macro.id, macro.name)
@@ -303,38 +331,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun applyPickerResult(result: PickerResult) {
-        if (result.macroId.isBlank() || result.stepId.isBlank()) return
-        val macro = repository.getMacro(result.macroId) ?: return
-        val updatedSteps = macro.steps.map { step ->
-            if (step.id != result.stepId) return@map step
-            when (result) {
-                is PickerResult.TapPicked -> if (step is TapStep) step.copy(x = result.x, y = result.y) else step
-                is PickerResult.SwipePicked -> if (step is SwipeStep) {
-                    step.copy(
-                        startX = result.startX,
-                        startY = result.startY,
-                        endX = result.endX,
-                        endY = result.endY
-                    )
-                } else step
-                is PickerResult.ColorPicked -> if (step is IfColorStep) {
-                    step.copy(x = result.x, y = result.y, targetHexColor = result.hexColor)
-                } else step
-                is PickerResult.TemplatePicked -> if (step is IfImageStep) {
-                    step.copy(
-                        templateId = result.templateId.ifBlank { step.templateId },
-                        templateName = result.templateName,
-                        searchLeft = (result.region.left - 32).coerceAtLeast(0),
-                        searchTop = (result.region.top - 32).coerceAtLeast(0),
-                        searchRight = result.region.right + 32,
-                        searchBottom = result.region.bottom + 32
-                    )
-                } else step
+    private fun applyPickerResult(result: PickerResult) {
+        val msg = when (result) {
+            is PickerResult.TapPicked -> if (result.stepId.isBlank()) {
+                "Added tap at (${result.x.toInt()}, ${result.y.toInt()})"
+            } else {
+                "Updated tap to (${result.x.toInt()}, ${result.y.toInt()})"
             }
+            is PickerResult.SwipePicked -> "Updated swipe gesture from screen picker"
+            is PickerResult.ColorPicked -> "Sampled ${result.hexColor} at (${result.x}, ${result.y})"
+            is PickerResult.TemplatePicked -> "Captured template '${result.templateName}'"
+            is PickerResult.RoiPicked -> "Updated search area (${result.region.left},${result.region.top})–(${result.region.right},${result.region.bottom})"
         }
-        repository.saveMacro(macro.copy(steps = updatedSteps))
-        _notices.tryEmit(UiNotice.Message("Updated step coordinates from screen picker"))
+        _notices.tryEmit(UiNotice.Message(msg))
     }
 
     private fun startForegroundServiceCompat(intent: Intent) {

@@ -59,11 +59,8 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Run unit and Robolectric tests
-        run: gradle :app:testDebugUnitTest --no-daemon
-
-      - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon
+      - name: Run unit tests and build Debug APK
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -Djava.awt.headless=true -Dfile.encoding=UTF-8"
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4

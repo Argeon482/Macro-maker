@@ -14,7 +14,8 @@ enum class PickerMode {
     PICK_TAP,
     PICK_SWIPE,
     PICK_COLOR,
-    PICK_TEMPLATE_CROP
+    PICK_TEMPLATE_CROP,
+    PICK_SEARCH_ROI
 }
 
 data class PickerRequest(
@@ -24,7 +25,12 @@ data class PickerRequest(
     val initialX: Float = 540f,
     val initialY: Float = 960f,
     val initialEndX: Float = 540f,
-    val initialEndY: Float = 560f
+    val initialEndY: Float = 560f,
+    val initialLeft: Int = 180,
+    val initialTop: Int = 420,
+    val initialRight: Int = 900,
+    val initialBottom: Int = 1140,
+    val returnToAppOnComplete: Boolean = false
 )
 
 sealed interface PickerResult {
@@ -62,6 +68,12 @@ sealed interface PickerResult {
         val templateName: String,
         val region: Rect
     ) : PickerResult
+
+    data class RoiPicked(
+        override val macroId: String,
+        override val stepId: String,
+        val region: Rect
+    ) : PickerResult
 }
 
 data class OverlayUiState(
@@ -70,14 +82,17 @@ data class OverlayUiState(
     val activeMacroName: String = "No Macro Loaded",
     val pickerMode: PickerMode = PickerMode.NONE,
     val pendingPickerRequest: PickerRequest? = null,
-    val isPickerPassThrough: Boolean = false
+    val isPickerPassThrough: Boolean = false,
+    val showOverlayStudio: Boolean = false,
+    val studioEditingStepId: String? = null,
+    val showPinsOverlay: Boolean = false
 )
 
 class OverlayCoordinator {
     private val _overlayState = MutableStateFlow(OverlayUiState())
     val overlayState: StateFlow<OverlayUiState> = _overlayState.asStateFlow()
 
-    private val _pickerResults = MutableSharedFlow<PickerResult>(extraBufferCapacity = 4)
+    private val _pickerResults = MutableSharedFlow<PickerResult>(extraBufferCapacity = 8)
     val pickerResults: SharedFlow<PickerResult> = _pickerResults.asSharedFlow()
 
     fun setOverlayShowing(showing: Boolean, macroId: String? = null, macroName: String? = null) {
@@ -85,7 +100,10 @@ class OverlayCoordinator {
             it.copy(
                 isOverlayShowing = showing,
                 activeMacroId = macroId ?: it.activeMacroId,
-                activeMacroName = macroName ?: it.activeMacroName
+                activeMacroName = macroName ?: it.activeMacroName,
+                showOverlayStudio = if (!showing) false else it.showOverlayStudio,
+                studioEditingStepId = if (!showing) null else it.studioEditingStepId,
+                showPinsOverlay = if (!showing) false else it.showPinsOverlay
             )
         }
     }
@@ -96,13 +114,41 @@ class OverlayCoordinator {
         }
     }
 
+    fun setOverlayStudioOpen(open: Boolean, editingStepId: String? = null) {
+        _overlayState.update {
+            it.copy(
+                showOverlayStudio = open,
+                studioEditingStepId = if (open) editingStepId else null,
+                showPinsOverlay = if (open) false else it.showPinsOverlay
+            )
+        }
+    }
+
+    fun setPinsOverlayOpen(open: Boolean) {
+        _overlayState.update {
+            it.copy(
+                showPinsOverlay = open,
+                showOverlayStudio = if (open) false else it.showOverlayStudio,
+                studioEditingStepId = if (open) null else it.studioEditingStepId
+            )
+        }
+    }
+
     fun startPicker(request: PickerRequest) {
         _overlayState.update {
             it.copy(
                 pickerMode = request.mode,
                 pendingPickerRequest = request,
-                isPickerPassThrough = false
+                isPickerPassThrough = false,
+                showOverlayStudio = false,
+                showPinsOverlay = false
             )
+        }
+    }
+
+    fun updatePendingPickerRequest(request: PickerRequest) {
+        _overlayState.update {
+            it.copy(pendingPickerRequest = request)
         }
     }
 

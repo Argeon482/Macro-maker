@@ -80,6 +80,7 @@ import com.example.model.SystemKeyAction
 import com.example.model.TapStep
 import com.example.model.VarComparator
 import com.example.model.VarOperation
+import com.example.service.PickerMode
 import com.example.ui.theme.AmberLogic
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldRun
@@ -222,7 +223,7 @@ fun EditStepBottomSheet(
     step: MacroStep,
     allSteps: List<MacroStep>,
     templates: List<TemplateAssetEntity>,
-    onPickOnScreen: (MacroStep) -> Unit,
+    onPickOnScreen: (MacroStep, PickerMode) -> Unit,
     onSave: (MacroStep) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -268,7 +269,7 @@ fun EditStepBottomSheet(
                                 y = yStr.toFloatOrNull() ?: step.y
                             )
                             onSave(current)
-                            onPickOnScreen(current)
+                            onPickOnScreen(current, PickerMode.PICK_TAP)
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -313,7 +314,7 @@ fun EditStepBottomSheet(
                         onClick = {
                             val current = step.copy(label = label)
                             onSave(current)
-                            onPickOnScreen(current)
+                            onPickOnScreen(current, PickerMode.PICK_SWIPE)
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -472,7 +473,7 @@ fun EditStepBottomSheet(
                         onClick = {
                             val current = step.copy(label = label)
                             onSave(current)
-                            onPickOnScreen(current)
+                            onPickOnScreen(current, PickerMode.PICK_COLOR)
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -548,6 +549,10 @@ fun EditStepBottomSheet(
                 is IfImageStep -> {
                     var selectedTemplateId by remember(step) { mutableStateOf(step.templateId) }
                     var selectedTemplateName by remember(step) { mutableStateOf(step.templateName) }
+                    var sLeft by remember(step) { mutableStateOf(step.searchLeft) }
+                    var sTop by remember(step) { mutableStateOf(step.searchTop) }
+                    var sRight by remember(step) { mutableStateOf(step.searchRight) }
+                    var sBottom by remember(step) { mutableStateOf(step.searchBottom) }
                     var confStr by remember(step) { mutableStateOf(step.minConfidencePct.toString()) }
                     var tapOnMatch by remember(step) { mutableStateOf(step.tapOnMatch) }
                     var thenAction by remember(step) { mutableStateOf(step.thenAction) }
@@ -555,19 +560,73 @@ fun EditStepBottomSheet(
                     var elseAction by remember(step) { mutableStateOf(step.elseAction) }
                     var elseJumpId by remember(step) { mutableStateOf(step.elseJumpStepId) }
 
-                    OutlinedButton(
-                        onClick = {
-                            val current = step.copy(label = label)
-                            onSave(current)
-                            onPickOnScreen(current)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                val current = step.copy(
+                                    label = label,
+                                    templateId = selectedTemplateId,
+                                    templateName = selectedTemplateName,
+                                    searchLeft = sLeft,
+                                    searchTop = sTop,
+                                    searchRight = sRight,
+                                    searchBottom = sBottom
+                                )
+                                onSave(current)
+                                onPickOnScreen(current, PickerMode.PICK_TEMPLATE_CROP)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                        ) {
+                            Icon(Icons.Default.CropFree, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Crop Image", color = ElectricCyan)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val current = step.copy(
+                                    label = label,
+                                    templateId = selectedTemplateId,
+                                    templateName = selectedTemplateName,
+                                    searchLeft = sLeft,
+                                    searchTop = sTop,
+                                    searchRight = sRight,
+                                    searchBottom = sBottom
+                                )
+                                onSave(current)
+                                onPickOnScreen(current, PickerMode.PICK_SEARCH_ROI)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                        ) {
+                            Text("Search Area", color = EmeraldRun)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.CropFree, contentDescription = null, tint = ElectricCyan)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Crop Target Image on Screen", color = ElectricCyan)
+                        Text(
+                            text = if (sRight > sLeft && sBottom > sTop) {
+                                "ROI: ($sLeft,$sTop)–($sRight,$sBottom)"
+                            } else {
+                                "ROI: Full Screen"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                        if (sRight > sLeft && sBottom > sTop) {
+                            OutlinedButton(
+                                onClick = { sLeft = 0; sTop = 0; sRight = 0; sBottom = 0 },
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Text("Reset ROI", color = TextSecondary)
+                            }
+                        }
                     }
 
                     if (templates.isNotEmpty()) {
@@ -612,6 +671,10 @@ fun EditStepBottomSheet(
                                 label = label.ifBlank { "If Image" },
                                 templateId = selectedTemplateId,
                                 templateName = selectedTemplateName,
+                                searchLeft = sLeft,
+                                searchTop = sTop,
+                                searchRight = sRight,
+                                searchBottom = sBottom,
                                 minConfidencePct = (confStr.toIntOrNull() ?: step.minConfidencePct).coerceIn(40, 100),
                                 tapOnMatch = tapOnMatch,
                                 thenAction = thenAction,

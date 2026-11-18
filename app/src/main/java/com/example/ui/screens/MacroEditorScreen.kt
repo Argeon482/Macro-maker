@@ -78,6 +78,7 @@ import com.example.model.SetVariableStep
 import com.example.model.StopStep
 import com.example.model.SwipeStep
 import com.example.model.TapStep
+import com.example.service.PickerMode
 import com.example.ui.theme.AmberLogic
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldRun
@@ -100,7 +101,7 @@ fun MacroEditorScreen(
     onSaveMacro: (MacroDefinition) -> Unit,
     onLaunchDock: (MacroDefinition) -> Unit,
     onRunNow: (MacroDefinition) -> Unit,
-    onPickOnScreen: (MacroDefinition, MacroStep) -> Unit,
+    onPickOnScreen: (MacroDefinition, MacroStep, PickerMode) -> Unit,
     onExportJson: (MacroDefinition) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -287,9 +288,9 @@ fun MacroEditorScreen(
             step = target,
             allSteps = macro.steps,
             templates = templates,
-            onPickOnScreen = { updatedStep ->
+            onPickOnScreen = { updatedStep, mode ->
                 editingStep = null
-                onPickOnScreen(macro, updatedStep)
+                onPickOnScreen(macro, updatedStep, mode)
             },
             onSave = { updatedStep ->
                 val updated = macro.steps.map { if (it.id == updatedStep.id) updatedStep else it }

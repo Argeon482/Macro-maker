@@ -11,11 +11,17 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.example.BuildConfig
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import kotlin.math.roundToInt
 import kotlin.random.Random
@@ -37,6 +43,8 @@ data class ShizukuStatus(
 )
 
 class ShizukuInputBridge(private val context: Context) {
+
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _status = MutableStateFlow(ShizukuStatus())
     val status: StateFlow<ShizukuStatus> = _status.asStateFlow()
@@ -71,17 +79,15 @@ class ShizukuInputBridge(private val context: Context) {
             val stub = IInputInjectorService.Stub.asInterface(service)
             injectorService = stub
             isBound = true
-            val ready = try {
-                stub?.ping() == true
-            } catch (_: Throwable) {
-                false
-            }
-            _status.update {
-                it.copy(
-                    state = if (ready) ShizukuConnectionState.CONNECTED else ShizukuConnectionState.BINDING,
-                    userServiceReady = ready,
-                    lastError = if (ready) null else "InputManager reflection unavailable in UserService"
-                )
+            ioScope.launch {
+                val ready = runCatching { stub?.ping() == true }.getOrDefault(false)
+                _status.update {
+                    it.copy(
+                        state = if (ready) ShizukuConnectionState.CONNECTED else ShizukuConnectionState.BINDING,
+                        userServiceReady = ready,
+                        lastError = if (ready) null else "InputManager reflection unavailable in UserService"
+                    )
+                }
             }
         }
 
@@ -128,7 +134,6 @@ class ShizukuInputBridge(private val context: Context) {
             Shizuku.addBinderDeadListener(binderDeadListener)
             Shizuku.addRequestPermissionResultListener(permissionListener)
         } catch (_: Throwable) {
-            // Safe guard if Shizuku binder not ready
         }
         refreshStatus()
     }
@@ -255,49 +260,40 @@ class ShizukuInputBridge(private val context: Context) {
         }
     }
 
-    suspend fun tap(x: Float, y: Float, holdMs: Long = 35L, jitterPx: Int = 0): Boolean {
-        val service = injectorService ?: return false
-        val offsetX = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
-        val offsetY = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
-        val tx = (x + offsetX).coerceAtLeast(0f)
-        val ty = (y + offsetY).coerceAtLeast(0f)
+    suspend fun tap(x: Float, y: Float, holdMs: Long = 35L, jitterPx: Int = 0): Boolean =
+        withContext(Dispatchers.IO) {
+            val service = injectorService ?: return@withContext false
+            val offsetX = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
+            val offsetY = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
+            val tx = (x + offsetX).coerceAtLeast(0f)
+            val ty = (y + offsetY).coerceAtLeast(0f)
 
-        val downTime = SystemClock.uptimeMillis()
-        activeDownTime = downTime
-        activeLastX = tx
-        activeLastY = ty
+            val downTime = SystemClock.uptimeMillis()
+            activeDownTime = downTime
+            activeLastX = tx
+            activeLastY = ty
 
-        val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, tx, ty)
-        val downOk = try {
-            service.injectInputEvent(down, MODE_WAIT_FOR_FINISH)
-        } catch (_: Throwable) {
-            false
-        } finally {
+            val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, tx, ty)
+            val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
             down.recycle()
-        }
 
-        if (!downOk) {
-            activeDownTime = null
-            return false
-        }
+            if (!downOk) {
+                activeDownTime = null
+                return@withContext false
+            }
 
-        if (holdMs > 0) {
-            delay(holdMs)
-        }
+            if (holdMs > 0) {
+                delay(holdMs)
+            }
 
-        val upTime = SystemClock.uptimeMillis()
-        val up = obtainTouchEvent(downTime, upTime, MotionEvent.ACTION_UP, tx, ty)
-        val upOk = try {
-            service.injectInputEvent(up, MODE_WAIT_FOR_FINISH)
-        } catch (_: Throwable) {
-            false
-        } finally {
+            val upTime = SystemClock.uptimeMillis()
+            val up = obtainTouchEvent(downTime, upTime, MotionEvent.ACTION_UP, tx, ty)
+            val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
             up.recycle()
             activeDownTime = null
-        }
 
-        return upOk
-    }
+            upOk
+        }
 
     suspend fun swipe(
         startX: Float,
@@ -306,8 +302,8 @@ class ShizukuInputBridge(private val context: Context) {
         endY: Float,
         durationMs: Long = 300L,
         steps: Int = 18
-    ): Boolean {
-        val service = injectorService ?: return false
+    ): Boolean = withContext(Dispatchers.IO) {
+        val service = injectorService ?: return@withContext false
         val safeSteps = steps.coerceIn(4, 120)
         val stepDelay = (durationMs / safeSteps).coerceAtLeast(4L)
         val downTime = SystemClock.uptimeMillis()
@@ -316,16 +312,11 @@ class ShizukuInputBridge(private val context: Context) {
         activeLastY = startY
 
         val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY)
-        val downOk = try {
-            service.injectInputEvent(down, MODE_WAIT_FOR_FINISH)
-        } catch (_: Throwable) {
-            false
-        } finally {
-            down.recycle()
-        }
+        val downOk = injectSafely(service, down, MODE_WAIT_FOR_FINISH)
+        down.recycle()
         if (!downOk) {
             activeDownTime = null
-            return false
+            return@withContext false
         }
 
         for (i in 1..safeSteps) {
@@ -345,26 +336,20 @@ class ShizukuInputBridge(private val context: Context) {
             try {
                 service.injectInputEvent(move, MODE_ASYNC)
             } catch (_: Throwable) {
-                // Continue toward ACTION_UP release
             } finally {
                 move.recycle()
             }
         }
 
         val up = obtainTouchEvent(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, endX, endY)
-        val upOk = try {
-            service.injectInputEvent(up, MODE_WAIT_FOR_FINISH)
-        } catch (_: Throwable) {
-            false
-        } finally {
-            up.recycle()
-            activeDownTime = null
-        }
-        return upOk
+        val upOk = injectSafely(service, up, MODE_WAIT_FOR_FINISH)
+        up.recycle()
+        activeDownTime = null
+        upOk
     }
 
-    fun pressKey(keyCode: Int): Boolean {
-        val service = injectorService ?: return false
+    suspend fun pressKey(keyCode: Int): Boolean = withContext(Dispatchers.IO) {
+        val service = injectorService ?: return@withContext false
         val downTime = SystemClock.uptimeMillis()
         val down = KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN, keyCode, 0).apply {
             source = InputDevice.SOURCE_KEYBOARD
@@ -372,7 +357,7 @@ class ShizukuInputBridge(private val context: Context) {
         val up = KeyEvent(downTime, downTime + 20L, KeyEvent.ACTION_UP, keyCode, 0).apply {
             source = InputDevice.SOURCE_KEYBOARD
         }
-        return try {
+        try {
             val d = service.injectInputEvent(down, MODE_WAIT_FOR_FINISH)
             val u = service.injectInputEvent(up, MODE_WAIT_FOR_FINISH)
             d && u
@@ -383,24 +368,39 @@ class ShizukuInputBridge(private val context: Context) {
 
     fun releaseActiveTouch() {
         val downTime = activeDownTime ?: return
-        val service = injectorService ?: run {
-            activeDownTime = null
-            return
+        val lastX = activeLastX
+        val lastY = activeLastY
+        activeDownTime = null
+        val service = injectorService ?: return
+        ioScope.launch {
+            val cancel = obtainTouchEvent(
+                downTime,
+                SystemClock.uptimeMillis(),
+                MotionEvent.ACTION_CANCEL,
+                lastX,
+                lastY
+            )
+            try {
+                service.injectInputEvent(cancel, MODE_ASYNC)
+            } catch (_: Throwable) {
+            } finally {
+                cancel.recycle()
+            }
         }
-        val cancel = obtainTouchEvent(
-            downTime,
-            SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_CANCEL,
-            activeLastX,
-            activeLastY
-        )
-        try {
-            service.injectInputEvent(cancel, MODE_WAIT_FOR_FINISH)
-        } catch (_: Throwable) {
-        } finally {
-            cancel.recycle()
-            activeDownTime = null
-        }
+    }
+
+    private suspend fun injectSafely(
+        service: IInputInjectorService,
+        event: MotionEvent,
+        mode: Int
+    ): Boolean {
+        return withTimeoutOrNull(2500L) {
+            try {
+                service.injectInputEvent(event, mode)
+            } catch (_: Throwable) {
+                false
+            }
+        } ?: false
     }
 
     private fun obtainTouchEvent(

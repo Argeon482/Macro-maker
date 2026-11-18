@@ -27,10 +27,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DragIndicator
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -88,6 +90,8 @@ fun FloatingControlDock(
     onPlayOrPause: () -> Unit,
     onStop: () -> Unit,
     onQuickPick: () -> Unit,
+    onTogglePins: () -> Unit,
+    onOpenOverlayStudio: () -> Unit,
     onOpenApp: () -> Unit,
     onCloseOverlay: () -> Unit
 ) {
@@ -107,7 +111,7 @@ fun FloatingControlDock(
         shadowElevation = 12.dp,
         modifier = Modifier
             .border(1.dp, StudioBorder, RoundedCornerShape(18.dp))
-            .widthIn(min = 160.dp, max = 280.dp)
+            .widthIn(min = 160.dp, max = 300.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
             Row(
@@ -227,30 +231,73 @@ fun FloatingControlDock(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         OutlinedButton(
-                            onClick = onQuickPick,
+                            onClick = {
+                                expanded = false
+                                onQuickPick()
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .height(40.dp),
                             shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp), tint = StudioCyan)
+                            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(15.dp), tint = StudioCyan)
                             Spacer(Modifier.width(4.dp))
-                            Text("Pick", fontSize = 12.sp, color = StudioText)
+                            Text("Pick", fontSize = 11.sp, color = StudioText)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                expanded = false
+                                onTogglePins()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.Place, contentDescription = null, modifier = Modifier.size(15.dp), tint = StudioAmber)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Pins", fontSize = 11.sp, color = StudioText)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                expanded = false
+                                onOpenOverlayStudio()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StudioCyan.copy(alpha = 0.2f),
+                                contentColor = StudioCyan
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Studio", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
 
                         IconButton(
                             onClick = onOpenApp,
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(44.dp)
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open Studio", tint = StudioText)
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open Full App", tint = StudioText)
                         }
 
                         IconButton(
                             onClick = onCloseOverlay,
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(44.dp)
                         ) {
                             Icon(Icons.Default.Close, contentDescription = "Close overlay", tint = StudioRose)
                         }
@@ -262,46 +309,72 @@ fun FloatingControlDock(
 }
 
 @Composable
+fun PassThroughOverlayChip(
+    onDragDelta: (dx: Int, dy: Int) -> Unit,
+    onResumePicker: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Surface(
+        color = StudioObsidian,
+        shape = RoundedCornerShape(16.dp),
+        shadowElevation = 10.dp,
+        modifier = Modifier
+            .border(1.dp, StudioCyan, RoundedCornerShape(16.dp))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            onDragDelta(dragAmount.x.roundToInt(), dragAmount.y.roundToInt())
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DragIndicator,
+                    contentDescription = "Drag switcher pill",
+                    tint = StudioMuted,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Button(
+                onClick = onResumePicker,
+                colors = ButtonDefaults.buttonColors(containerColor = StudioCyan, contentColor = Color(0xFF061018)),
+                modifier = Modifier.height(44.dp)
+            ) {
+                Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Place Target", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+
+            IconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel pick", tint = StudioRose)
+            }
+        }
+    }
+}
+
+@Composable
 fun TargetPickerOverlay(
     request: PickerRequest,
     screenCaptureActive: Boolean,
-    isPassThrough: Boolean,
-    onTogglePassThrough: (Boolean) -> Unit,
+    targetSubtitle: String? = null,
+    onSwitchApp: (updatedDraftRequest: PickerRequest) -> Unit,
     onConfirmTap: (x: Float, y: Float) -> Unit,
     onConfirmSwipe: (sx: Float, sy: Float, ex: Float, ey: Float) -> Unit,
     onConfirmColor: (x: Int, y: Int) -> Unit,
     onConfirmCrop: (left: Int, top: Int, right: Int, bottom: Int) -> Unit,
+    onConfirmRoi: (left: Int, top: Int, right: Int, bottom: Int) -> Unit,
     onCancel: () -> Unit
 ) {
-    if (isPassThrough) {
-        Surface(
-            color = StudioObsidian,
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier
-                .border(1.dp, StudioCyan, RoundedCornerShape(16.dp))
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = { onTogglePassThrough(false) },
-                    colors = ButtonDefaults.buttonColors(containerColor = StudioCyan, contentColor = Color(0xFF061018)),
-                    modifier = Modifier.height(48.dp)
-                ) {
-                    Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Place Target", fontWeight = FontWeight.Bold)
-                }
-                IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "Cancel pick", tint = StudioRose)
-                }
-            }
-        }
-        return
-    }
-
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -310,20 +383,40 @@ fun TargetPickerOverlay(
         val density = LocalDensity.current
         val maxW = with(density) { maxWidth.toPx() }
         val maxH = with(density) { maxHeight.toPx() }
+        if (maxW < 180f || maxH < 260f) return@BoxWithConstraints
 
-        var tapX by remember(request) { mutableFloatStateOf(request.initialX.coerceIn(40f, maxW - 40f)) }
-        var tapY by remember(request) { mutableFloatStateOf(request.initialY.coerceIn(80f, maxH - 120f)) }
+        val safeTapMaxX = maxOf(41f, maxW - 40f)
+        val safeTapMaxY = maxOf(81f, maxH - 120f)
+        val safeDragMaxX = maxOf(20f, maxW - 16f)
+        val safeDragMaxY = maxOf(20f, maxH - 16f)
 
-        var endX by remember(request) { mutableFloatStateOf(request.initialEndX.coerceIn(40f, maxW - 40f)) }
-        var endY by remember(request) { mutableFloatStateOf(request.initialEndY.coerceIn(80f, maxH - 120f)) }
+        var tapX by remember(request) { mutableFloatStateOf(request.initialX.coerceIn(40f, safeTapMaxX)) }
+        var tapY by remember(request) { mutableFloatStateOf(request.initialY.coerceIn(80f, safeTapMaxY)) }
 
-        var cropLeft by remember(request) { mutableFloatStateOf((request.initialX - 120f).coerceIn(24f, maxW - 180f)) }
-        var cropTop by remember(request) { mutableFloatStateOf((request.initialY - 90f).coerceIn(100f, maxH - 220f)) }
-        var cropRight by remember(request) { mutableFloatStateOf((cropLeft + 240f).coerceIn(cropLeft + 60f, maxW - 24f)) }
-        var cropBottom by remember(request) { mutableFloatStateOf((cropTop + 180f).coerceIn(cropTop + 60f, maxH - 140f)) }
+        var endX by remember(request) { mutableFloatStateOf(request.initialEndX.coerceIn(40f, safeTapMaxX)) }
+        var endY by remember(request) { mutableFloatStateOf(request.initialEndY.coerceIn(80f, safeTapMaxY)) }
+
+        val hasPresetRect = request.initialRight > request.initialLeft + 30 && request.initialBottom > request.initialTop + 30
+        val initLeft = if (hasPresetRect) request.initialLeft.toFloat() else (request.initialX - 140f)
+        val initTop = if (hasPresetRect) request.initialTop.toFloat() else (request.initialY - 110f)
+        val initRight = if (hasPresetRect) request.initialRight.toFloat() else (initLeft + 280f)
+        val initBottom = if (hasPresetRect) request.initialBottom.toFloat() else (initTop + 220f)
+
+        val safeRectLeftMax = maxOf(40f, maxW - 160f)
+        val safeRectTopMax = maxOf(100f, maxH - 220f)
+        var cropLeft by remember(request) { mutableFloatStateOf(initLeft.coerceIn(24f, safeRectLeftMax)) }
+        var cropTop by remember(request) { mutableFloatStateOf(initTop.coerceIn(90f, safeRectTopMax)) }
+        var cropRight by remember(request) {
+            mutableFloatStateOf(initRight.coerceIn(cropLeft + 60f, maxOf(cropLeft + 61f, maxW - 24f)))
+        }
+        var cropBottom by remember(request) {
+            mutableFloatStateOf(initBottom.coerceIn(cropTop + 60f, maxOf(cropTop + 61f, maxH - 130f)))
+        }
+
+        val isBoxMode = request.mode == PickerMode.PICK_TEMPLATE_CROP || request.mode == PickerMode.PICK_SEARCH_ROI
+        val boxAccent = if (request.mode == PickerMode.PICK_SEARCH_ROI) StudioEmerald else StudioCyan
 
         Canvas(modifier = Modifier.fillMaxSize()) {
-            // Subtle precision studio grid
             val step = 72f
             var gx = 0f
             while (gx < size.width) {
@@ -358,18 +451,18 @@ fun TargetPickerOverlay(
                     drawCircle(StudioAmber, radius = 26f, center = Offset(endX, endY), style = Stroke(width = 3f))
                 }
 
-                PickerMode.PICK_TEMPLATE_CROP -> {
+                PickerMode.PICK_TEMPLATE_CROP, PickerMode.PICK_SEARCH_ROI -> {
                     val left = minOf(cropLeft, cropRight)
                     val top = minOf(cropTop, cropBottom)
                     val w = kotlin.math.abs(cropRight - cropLeft)
                     val h = kotlin.math.abs(cropBottom - cropTop)
                     drawRect(
-                        color = StudioCyan.copy(alpha = 0.14f),
+                        color = boxAccent.copy(alpha = 0.14f),
                         topLeft = Offset(left, top),
                         size = Size(w, h)
                     )
                     drawRect(
-                        color = StudioCyan,
+                        color = boxAccent,
                         topLeft = Offset(left, top),
                         size = Size(w, h),
                         style = Stroke(width = 3f)
@@ -380,7 +473,6 @@ fun TargetPickerOverlay(
             }
         }
 
-        // Draggable handles
         when (request.mode) {
             PickerMode.PICK_TAP, PickerMode.PICK_COLOR -> {
                 DraggableHandle(
@@ -389,8 +481,8 @@ fun TargetPickerOverlay(
                     badge = if (request.mode == PickerMode.PICK_COLOR) "COLOR" else "TAP",
                     accent = if (request.mode == PickerMode.PICK_COLOR) StudioEmerald else StudioCyan,
                     onDrag = { dx, dy ->
-                        tapX = (tapX + dx).coerceIn(16f, maxW - 16f)
-                        tapY = (tapY + dy).coerceIn(16f, maxH - 16f)
+                        tapX = (tapX + dx).coerceIn(16f, safeDragMaxX)
+                        tapY = (tapY + dy).coerceIn(16f, safeDragMaxY)
                     }
                 )
             }
@@ -402,8 +494,8 @@ fun TargetPickerOverlay(
                     badge = "START",
                     accent = StudioCyan,
                     onDrag = { dx, dy ->
-                        tapX = (tapX + dx).coerceIn(16f, maxW - 16f)
-                        tapY = (tapY + dy).coerceIn(16f, maxH - 16f)
+                        tapX = (tapX + dx).coerceIn(16f, safeDragMaxX)
+                        tapY = (tapY + dy).coerceIn(16f, safeDragMaxY)
                     }
                 )
                 DraggableHandle(
@@ -412,21 +504,21 @@ fun TargetPickerOverlay(
                     badge = "END",
                     accent = StudioAmber,
                     onDrag = { dx, dy ->
-                        endX = (endX + dx).coerceIn(16f, maxW - 16f)
-                        endY = (endY + dy).coerceIn(16f, maxH - 16f)
+                        endX = (endX + dx).coerceIn(16f, safeDragMaxX)
+                        endY = (endY + dy).coerceIn(16f, safeDragMaxY)
                     }
                 )
             }
 
-            PickerMode.PICK_TEMPLATE_CROP -> {
+            PickerMode.PICK_TEMPLATE_CROP, PickerMode.PICK_SEARCH_ROI -> {
                 DraggableHandle(
                     x = cropLeft,
                     y = cropTop,
                     badge = "TL",
-                    accent = StudioCyan,
+                    accent = boxAccent,
                     onDrag = { dx, dy ->
-                        cropLeft = (cropLeft + dx).coerceIn(16f, cropRight - 48f)
-                        cropTop = (cropTop + dy).coerceIn(60f, cropBottom - 48f)
+                        cropLeft = (cropLeft + dx).coerceIn(16f, maxOf(17f, cropRight - 48f))
+                        cropTop = (cropTop + dy).coerceIn(60f, maxOf(61f, cropBottom - 48f))
                     }
                 )
                 DraggableHandle(
@@ -435,8 +527,8 @@ fun TargetPickerOverlay(
                     badge = "BR",
                     accent = StudioAmber,
                     onDrag = { dx, dy ->
-                        cropRight = (cropRight + dx).coerceIn(cropLeft + 48f, maxW - 16f)
-                        cropBottom = (cropBottom + dy).coerceIn(cropTop + 48f, maxH - 80f)
+                        cropRight = (cropRight + dx).coerceIn(cropLeft + 48f, maxOf(cropLeft + 49f, maxW - 16f))
+                        cropBottom = (cropBottom + dy).coerceIn(cropTop + 48f, maxOf(cropTop + 49f, maxH - 80f))
                     }
                 )
             }
@@ -461,11 +553,11 @@ fun TargetPickerOverlay(
                 Icon(
                     imageVector = when (request.mode) {
                         PickerMode.PICK_COLOR -> Icons.Default.Colorize
-                        PickerMode.PICK_TEMPLATE_CROP -> Icons.Default.CropFree
+                        PickerMode.PICK_TEMPLATE_CROP, PickerMode.PICK_SEARCH_ROI -> Icons.Default.CropFree
                         else -> Icons.Default.MyLocation
                     },
                     contentDescription = null,
-                    tint = StudioCyan
+                    tint = if (request.mode == PickerMode.PICK_SEARCH_ROI) StudioEmerald else StudioCyan
                 )
                 Column {
                     Text(
@@ -473,26 +565,42 @@ fun TargetPickerOverlay(
                             PickerMode.PICK_TAP -> "Drag Reticle to Tap Coordinate"
                             PickerMode.PICK_SWIPE -> "Drag Start & End Swipe Handles"
                             PickerMode.PICK_COLOR -> "Drag Eyedropper to Pixel Target"
-                            PickerMode.PICK_TEMPLATE_CROP -> "Resize Box Around Target Element"
+                            PickerMode.PICK_TEMPLATE_CROP -> "Crop Target Image Box"
+                            PickerMode.PICK_SEARCH_ROI -> "Set Image Search Area (ROI)"
                             PickerMode.NONE -> ""
                         },
                         color = StudioText,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                    if (!targetSubtitle.isNullOrBlank()) {
+                        Text(
+                            text = targetSubtitle,
+                            color = StudioAmber,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     val coords = when (request.mode) {
                         PickerMode.PICK_TAP, PickerMode.PICK_COLOR -> "X: ${tapX.roundToInt()}  Y: ${tapY.roundToInt()}"
                         PickerMode.PICK_SWIPE -> "(${tapX.roundToInt()},${tapY.roundToInt()}) -> (${endX.roundToInt()},${endY.roundToInt()})"
-                        PickerMode.PICK_TEMPLATE_CROP -> "${(cropRight - cropLeft).roundToInt()}x${(cropBottom - cropTop).roundToInt()} px"
+                        PickerMode.PICK_TEMPLATE_CROP, PickerMode.PICK_SEARCH_ROI -> {
+                            val l = minOf(cropLeft, cropRight).roundToInt()
+                            val t = minOf(cropTop, cropBottom).roundToInt()
+                            val r = maxOf(cropLeft, cropRight).roundToInt()
+                            val b = maxOf(cropTop, cropBottom).roundToInt()
+                            "($l,$t)–($r,$b)  ${r - l}x${b - t}px"
+                        }
                         PickerMode.NONE -> ""
                     }
                     Text(
                         text = if ((request.mode == PickerMode.PICK_COLOR || request.mode == PickerMode.PICK_TEMPLATE_CROP) && !screenCaptureActive) {
-                            "$coords  •  Enable Screen Capture for live sampling"
+                            "$coords  •  Enable Vision Capture for live sampling"
                         } else {
                             coords
                         },
-                        color = StudioCyan,
+                        color = if (isBoxMode && request.mode == PickerMode.PICK_SEARCH_ROI) StudioEmerald else StudioCyan,
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -506,45 +614,58 @@ fun TargetPickerOverlay(
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 36.dp, start = 20.dp, end = 20.dp)
+                .padding(bottom = 36.dp, start = 16.dp, end = 16.dp)
                 .border(1.dp, StudioBorder, RoundedCornerShape(16.dp))
         ) {
             Row(
                 modifier = Modifier.padding(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
                     onClick = onCancel,
                     modifier = Modifier.height(48.dp)
                 ) {
-                    Text("Cancel", color = StudioMuted)
+                    Text("Cancel", color = StudioMuted, fontSize = 12.sp)
                 }
                 OutlinedButton(
-                    onClick = { onTogglePassThrough(true) },
+                    onClick = {
+                        onSwitchApp(
+                            request.copy(
+                                initialX = tapX,
+                                initialY = tapY,
+                                initialEndX = endX,
+                                initialEndY = endY,
+                                initialLeft = minOf(cropLeft, cropRight).roundToInt(),
+                                initialTop = minOf(cropTop, cropBottom).roundToInt(),
+                                initialRight = maxOf(cropLeft, cropRight).roundToInt(),
+                                initialBottom = maxOf(cropTop, cropBottom).roundToInt()
+                            )
+                        )
+                    },
                     modifier = Modifier.height(48.dp)
                 ) {
-                    Text("Switch App", color = StudioAmber)
+                    Text("Switch App", color = StudioAmber, fontSize = 12.sp)
                 }
                 Button(
                     onClick = {
+                        val l = minOf(cropLeft, cropRight).roundToInt()
+                        val t = minOf(cropTop, cropBottom).roundToInt()
+                        val r = maxOf(cropLeft, cropRight).roundToInt()
+                        val b = maxOf(cropTop, cropBottom).roundToInt()
                         when (request.mode) {
                             PickerMode.PICK_TAP -> onConfirmTap(tapX, tapY)
                             PickerMode.PICK_SWIPE -> onConfirmSwipe(tapX, tapY, endX, endY)
                             PickerMode.PICK_COLOR -> onConfirmColor(tapX.roundToInt(), tapY.roundToInt())
-                            PickerMode.PICK_TEMPLATE_CROP -> onConfirmCrop(
-                                cropLeft.roundToInt(),
-                                cropTop.roundToInt(),
-                                cropRight.roundToInt(),
-                                cropBottom.roundToInt()
-                            )
+                            PickerMode.PICK_TEMPLATE_CROP -> onConfirmCrop(l, t, r, b)
+                            PickerMode.PICK_SEARCH_ROI -> onConfirmRoi(l, t, r, b)
                             PickerMode.NONE -> Unit
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = StudioCyan, contentColor = Color(0xFF061018)),
                     modifier = Modifier.height(48.dp)
                 ) {
-                    Text("Confirm", fontWeight = FontWeight.Bold)
+                    Text("Confirm", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
         }

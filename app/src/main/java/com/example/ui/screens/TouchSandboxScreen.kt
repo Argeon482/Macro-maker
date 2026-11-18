@@ -50,7 +50,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
@@ -62,7 +63,6 @@ import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldRun
 import com.example.ui.theme.HairlineBorder
 import com.example.ui.theme.ObsidianBg
-import com.example.ui.theme.RoseAlert
 import com.example.ui.theme.SlateSurface
 import com.example.ui.theme.SlateWell
 import com.example.ui.theme.TextPrimary
@@ -70,8 +70,7 @@ import com.example.ui.theme.TextSecondary
 
 private data class SandboxTouchDot(
     val x: Float,
-    val y: Float,
-    val sourceLabel: String
+    val y: Float
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,9 +83,10 @@ fun TouchSandboxScreen(
 ) {
     var targetHits by remember { mutableIntStateOf(0) }
     var lastEventSummary by remember { mutableStateOf("Tap or swipe anywhere on the pad") }
-    var padOrigin by remember { mutableStateOf(Offset.Zero) }
+    var padScreenOrigin by remember { mutableStateOf(Offset.Zero) }
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     val recentDots = remember { mutableStateListOf<SandboxTouchDot>() }
+    val hostView = LocalView.current
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -149,7 +149,6 @@ fun TouchSandboxScreen(
                     }
                 }
 
-                // Interactive test canvas
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -158,7 +157,13 @@ fun TouchSandboxScreen(
                         .background(SlateWell)
                         .border(1.dp, HairlineBorder, RoundedCornerShape(18.dp))
                         .onGloballyPositioned { coords ->
-                            padOrigin = coords.positionInRoot()
+                            val winLoc = IntArray(2)
+                            hostView.getLocationOnScreen(winLoc)
+                            val posInWin = coords.positionInWindow()
+                            padScreenOrigin = Offset(
+                                x = winLoc[0] + posInWin.x,
+                                y = winLoc[1] + posInWin.y
+                            )
                             padSize = coords.size
                         }
                         .pointerInput(Unit) {
@@ -167,11 +172,11 @@ fun TouchSandboxScreen(
                                     val event = awaitPointerEvent()
                                     val change = event.changes.firstOrNull() ?: continue
                                     val pos = change.position
-                                    val rootX = padOrigin.x + pos.x
-                                    val rootY = padOrigin.y + pos.y
+                                    val screenX = padScreenOrigin.x + pos.x
+                                    val screenY = padScreenOrigin.y + pos.y
                                     if (event.type == PointerEventType.Press || event.type == PointerEventType.Move) {
-                                        lastEventSummary = "Pointer ${event.type}: local(${pos.x.toInt()},${pos.y.toInt()}) screen(${rootX.toInt()},${rootY.toInt()})"
-                                        recentDots.add(SandboxTouchDot(pos.x, pos.y, "PTR"))
+                                        lastEventSummary = "Pointer ${event.type}: local(${pos.x.toInt()},${pos.y.toInt()}) screen(${screenX.toInt()},${screenY.toInt()})"
+                                        recentDots.add(SandboxTouchDot(pos.x, pos.y))
                                         if (recentDots.size > 24) recentDots.removeAt(0)
                                     }
                                 }
@@ -202,7 +207,6 @@ fun TouchSandboxScreen(
                         }
                     }
 
-                    // Color/Tap Target Button inside Sandbox
                     Box(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -244,8 +248,8 @@ fun TouchSandboxScreen(
                 ) {
                     Button(
                         onClick = {
-                            val cx = padOrigin.x + padSize.width / 2f
-                            val cy = padOrigin.y + padSize.height / 2f
+                            val cx = padScreenOrigin.x + padSize.width / 2f
+                            val cy = padScreenOrigin.y + padSize.height / 2f
                             onTestTap(cx, cy)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color(0xFF04131A)),
@@ -261,9 +265,9 @@ fun TouchSandboxScreen(
 
                     OutlinedButton(
                         onClick = {
-                            val sx = padOrigin.x + padSize.width * 0.25f
-                            val ex = padOrigin.x + padSize.width * 0.75f
-                            val sy = padOrigin.y + padSize.height * 0.75f
+                            val sx = padScreenOrigin.x + padSize.width * 0.25f
+                            val ex = padScreenOrigin.x + padSize.width * 0.75f
+                            val sy = padScreenOrigin.y + padSize.height * 0.78f
                             onTestSwipe(sx, sy, ex, sy)
                         },
                         modifier = Modifier
