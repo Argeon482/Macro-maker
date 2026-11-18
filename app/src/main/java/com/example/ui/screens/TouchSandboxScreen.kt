@@ -437,6 +437,7 @@ fun TouchSandboxScreen(
 
     var joystickWindowRect by remember { mutableStateOf(RectF()) }
     var targetWindowRect by remember { mutableStateOf(RectF()) }
+    var arenaWindowOrigin by remember { mutableStateOf(Offset.Zero) }
     var padScreenOrigin by remember { mutableStateOf(Offset.Zero) }
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     var targetScreenCenter by remember { mutableStateOf(Offset.Zero) }
@@ -588,13 +589,16 @@ fun TouchSandboxScreen(
                         }
 
                         Text(
-                            text = if (hardwareDiagnostics.devInputReadable) {
-                                "evdev: READABLE (${hardwareDiagnostics.physicalTouchDeviceName})"
-                            } else {
-                                "evdev: SELinux-blocked • Co-Touch Slot${hardwareDiagnostics.cooperativeFingerPointerId} & Hover ready"
+                            text = when {
+                                hardwareDiagnostics.devInputWritable ->
+                                    "evdev: RW WRITABLE (${hardwareDiagnostics.physicalTouchDeviceName}) • Kernel Slot 9 READY"
+                                hardwareDiagnostics.devInputReadable ->
+                                    "evdev: RO READ-ONLY (${hardwareDiagnostics.physicalTouchDeviceName}) • Write blocked by SELinux"
+                                else ->
+                                    "evdev: SELinux-blocked • Hover Click & Touch Guard"
                             },
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (hardwareDiagnostics.devInputReadable) EmeraldRun else AmberLogic,
+                            color = if (hardwareDiagnostics.devInputWritable) EmeraldRun else AmberLogic,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -653,6 +657,9 @@ fun TouchSandboxScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .onGloballyPositioned { coords ->
+                            arenaWindowOrigin = coords.positionInWindow()
+                        }
                         .pointerInput(Unit) {
                             awaitPointerEventScope {
                                 while (true) {
@@ -661,7 +668,7 @@ fun TouchSandboxScreen(
                                     arenaRouter.handleComposeHoverOrButton(
                                         type = pe.type,
                                         pointerType = first.type,
-                                        winPos = first.position,
+                                        winPos = first.position + arenaWindowOrigin,
                                         uptimeMs = first.uptimeMillis,
                                         targetRectInWin = targetWindowRect
                                     )

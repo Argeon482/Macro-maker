@@ -9,6 +9,9 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.view.InputDevice
 import android.view.MotionEvent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.AppDatabase
@@ -380,5 +383,55 @@ class ExampleRobolectricTest {
         assertTrue(dragging)
         assertEquals(0, cancelCount)
         assertEquals(1, targetHits)
+    }
+
+    @Test
+    fun sandboxRouter_handlesHoverClickDuringActiveJoystickDrag() {
+        var dragging = false
+        var cancelCount = 0
+        var targetHits = 0
+        var lastTool = ""
+
+        val router = SandboxMultiPointerRouter(
+            onJoystickState = { isDragging, _, _, incCancel, _, _ ->
+                dragging = isDragging
+                if (incCancel) cancelCount++
+            },
+            onCooperativeFingerUpdate = { _, _, _, _, _, _ -> },
+            onTargetEvent = { _, _, toolLabel, _, countHit, _ ->
+                lastTool = toolLabel
+                if (countHit) targetHits++
+            }
+        )
+
+        val targetRect = RectF(0f, 0f, 400f, 400f)
+        val joystickRect = RectF(0f, 420f, 400f, 820f)
+        val props0 = arrayOf(MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER })
+        val coords0 = arrayOf(MotionEvent.PointerCoords().apply { x = 200f; y = 620f; pressure = 1f; size = 1f })
+
+        val down = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 1, props0, coords0, 0, 0, 1f, 1f, 6, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+        router.handleTouchEvent(down, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Hover Click")
+        down.recycle()
+
+        router.handleComposeHoverOrButton(
+            type = PointerEventType.Press,
+            pointerType = PointerType.Mouse,
+            winPos = Offset(200f, 200f),
+            uptimeMs = 150L,
+            targetRectInWin = targetRect
+        )
+        // Same timestamp deduplication
+        router.handleComposeHoverOrButton(
+            type = PointerEventType.Press,
+            pointerType = PointerType.Mouse,
+            winPos = Offset(200f, 200f),
+            uptimeMs = 150L,
+            targetRectInWin = targetRect
+        )
+
+        assertTrue(dragging)
+        assertEquals(0, cancelCount)
+        assertEquals(1, targetHits)
+        assertEquals("MOUSE_BTN", lastTool)
     }
 }

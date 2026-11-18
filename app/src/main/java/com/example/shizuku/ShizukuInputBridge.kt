@@ -5,11 +5,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.Surface
+import android.view.WindowManager
 import com.example.BuildConfig
 import com.example.model.InputInjectionMode
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +51,8 @@ data class HardwareInputDiagnostics(
     val physicalTouchDeviceId: Int = 0,
     val physicalTouchDeviceName: String = "Unknown",
     val devInputReadable: Boolean = false,
+    val devInputWritable: Boolean = false,
+    val uinputWritable: Boolean = false,
     val rootAvailable: Boolean = false,
     val touchMonitorRunning: Boolean = false,
     val cooperativeFingerDown: Boolean = false,
@@ -96,7 +101,7 @@ class ShizukuInputBridge(private val context: Context) {
             .daemon(false)
             .processNameSuffix("shizuku_injector")
             .debuggable(BuildConfig.DEBUG)
-            .version(2)
+            .version(3)
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -271,6 +276,8 @@ class ShizukuInputBridge(private val context: Context) {
                 val raw = service.probeCapabilities()
                 val json = JSONObject(raw)
                 val devReadable = json.optBoolean("devInputReadable", false)
+                val devWritable = json.optBoolean("devInputWritable", false)
+                val uinputWritable = json.optBoolean("uinputWritable", false)
                 val monitorStarted = if (devReadable) {
                     runCatching { service.startTouchMonitor() }.getOrDefault(false)
                 } else {
@@ -281,6 +288,8 @@ class ShizukuInputBridge(private val context: Context) {
                         physicalTouchDeviceId = json.optInt("touchDeviceId", 0),
                         physicalTouchDeviceName = json.optString("touchDeviceName", "Unknown"),
                         devInputReadable = devReadable,
+                        devInputWritable = devWritable,
+                        uinputWritable = uinputWritable,
                         rootAvailable = json.optBoolean("rootAvailable", false),
                         touchMonitorRunning = monitorStarted || json.optBoolean("touchMonitorRunning", false),
                         lastBypassReport = json.optString("note", raw)
@@ -369,6 +378,16 @@ class ShizukuInputBridge(private val context: Context) {
         val stepDelay = (durationMs / safeSteps).coerceAtLeast(4L)
 
         if (mode == InputInjectionMode.CO_TOUCH_MULTIPLEX) {
+            if (_diagnostics.value.devInputWritable) {
+                val (psx, psy, pw, ph) = toNaturalPanelCoords(startX, startY)
+                val (pex, pey, _, _) = toNaturalPanelCoords(endX, endY)
+                val ok = runCatching {
+                    service.injectEvdevSwipe(psx, psy, pex, pey, pw, ph, durationMs, safeSteps)
+                }.getOrDefault(false)
+                val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+                _diagnostics.update { it.copy(lastBypassReport = detail) }
+                if (ok) return@withContext true
+            }
             val finger = resolveActiveFingerSnapshot(service)
             if (finger != null) {
                 return@withContext injectCoTouchSwipe(
@@ -585,6 +604,16 @@ class ShizukuInputBridge(private val context: Context) {
         ty: Float,
         holdMs: Long
     ): Boolean {
+        if (_diagnostics.value.devInputWritable) {
+            val (px, py, pw, ph) = toNaturalPanelCoords(tx, ty)
+            val evdevOk = runCatching {
+                service.injectEvdevTap(px, py, pw, ph, holdMs)
+            }.getOrDefault(false)
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+            _diagnostics.update { it.copy(lastBypassReport = detail) }
+            if (evdevOk) return true
+        }
+
         val finger = resolveActiveFingerSnapshot(service)
         if (finger == null) {
             _diagnostics.update {
@@ -921,12 +950,62 @@ class ShizukuInputBridge(private val context: Context) {
             0
         )
         if (actionButton != null) {
-            runCatching {
-                val method = MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
+            val setOk = runCatching {
+                val method = MotionEvent::class.java.getDeclaredMethod("setActionButton", Int::class.javaPrimitiveType)
+                method.isAccessible = true
                 method.invoke(event, actionButton)
+                true
+            }.getOrDefault(false)
+            if (!setOk) {
+                _diagnostics.update { it.copy(lastBypassReport = "Hidden API blocked MotionEvent.setActionButton") }
             }
         }
         return event
+    }
+
+    private data class PanelCoords(val x: Float, val y: Float, val w: Int, val h: Int)
+
+    private fun toNaturalPanelCoords(x: Float, y: Float): PanelCoords {
+        val (sw, sh) = realDisplaySize()
+        @Suppress("DEPRECATION")
+        val rotation = runCatching {
+            val wm = context.getSystemService(WindowManager::class.java)
+            wm?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        }.getOrDefault(Surface.ROTATION_0)
+
+        return when (rotation) {
+            Surface.ROTATION_90 -> PanelCoords(
+                x = ((1f - (y / sh.toFloat())) * sh).coerceIn(0f, sh.toFloat()),
+                y = ((x / sw.toFloat()) * sw).coerceIn(0f, sw.toFloat()),
+                w = sh,
+                h = sw
+            )
+            Surface.ROTATION_180 -> PanelCoords(
+                x = (sw.toFloat() - x).coerceIn(0f, sw.toFloat()),
+                y = (sh.toFloat() - y).coerceIn(0f, sh.toFloat()),
+                w = sw,
+                h = sh
+            )
+            Surface.ROTATION_270 -> PanelCoords(
+                x = ((y / sh.toFloat()) * sh).coerceIn(0f, sh.toFloat()),
+                y = ((1f - (x / sw.toFloat())) * sw).coerceIn(0f, sw.toFloat()),
+                w = sh,
+                h = sw
+            )
+            else -> PanelCoords(x = x, y = y, w = sw, h = sh)
+        }
+    }
+
+    private fun realDisplaySize(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val wm = context.getSystemService(WindowManager::class.java)
+            val bounds = wm?.maximumWindowMetrics?.bounds
+            if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+                return bounds.width() to bounds.height()
+            }
+        }
+        val dm = context.resources.displayMetrics
+        return dm.widthPixels.coerceAtLeast(1) to dm.heightPixels.coerceAtLeast(1)
     }
 
     companion object {

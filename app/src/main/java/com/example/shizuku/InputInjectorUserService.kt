@@ -10,9 +10,14 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.lang.reflect.Method
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
 class InputInjectorUserService : IInputInjectorService.Stub() {
@@ -37,13 +42,36 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
     private var fingerUpdatedMs: Long = 0L
 
     @Volatile
-    private var cachedTouchMaxX: Float = 1080f
+    private var cachedTouchMinX: Float = 0f
 
     @Volatile
-    private var cachedTouchMaxY: Float = 2400f
+    private var cachedTouchMaxX: Float = 4095f
+
+    @Volatile
+    private var cachedTouchMinY: Float = 0f
+
+    @Volatile
+    private var cachedTouchMaxY: Float = 4095f
+
+    @Volatile
+    private var cachedEvdevMaxSlot: Int = 9
+
+    @Volatile
+    private var evdevSupportsTouchMajor: Boolean = false
+
+    @Volatile
+    private var evdevSupportsPressure: Boolean = false
+
+    @Volatile
+    private var cachedTouchNodePath: String? = null
+
+    @Volatile
+    private var cachedEvdevWritable: Boolean = false
 
     @Volatile
     private var lastInjectDiagnostic: String = "No events injected yet"
+
+    private val trackingIdSeq = AtomicInteger(9000)
 
     init {
         resolveInputManager()
@@ -80,6 +108,18 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         } ?: return false
         val method = injectInputEventMethod ?: return false
         return try {
+            if (event is MotionEvent) {
+                val masked = event.actionMasked
+                if ((masked == MotionEvent.ACTION_BUTTON_PRESS || masked == MotionEvent.ACTION_BUTTON_RELEASE) &&
+                    event.actionButton == 0
+                ) {
+                    runCatching {
+                        val setBtn = MotionEvent::class.java.getDeclaredMethod("setActionButton", Int::class.javaPrimitiveType)
+                        setBtn.isAccessible = true
+                        setBtn.invoke(event, MotionEvent.BUTTON_PRIMARY)
+                    }
+                }
+            }
             val ok = (method.invoke(im, event, mode) as? Boolean) ?: false
             lastInjectDiagnostic = if (event is MotionEvent) {
                 "ok=$ok act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
@@ -104,14 +144,29 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         val touchId = touchDevice?.id ?: 0
         val touchName = touchDevice?.name ?: "None Detected"
         touchDevice?.getMotionRange(MotionEvent.AXIS_X)?.let {
-            if (it.max > 0f) cachedTouchMaxX = it.max
+            if (it.max > 0f) {
+                cachedTouchMinX = it.min
+                cachedTouchMaxX = it.max
+            }
         }
         touchDevice?.getMotionRange(MotionEvent.AXIS_Y)?.let {
-            if (it.max > 0f) cachedTouchMaxY = it.max
+            if (it.max > 0f) {
+                cachedTouchMinY = it.min
+                cachedTouchMaxY = it.max
+            }
         }
 
         val readableNode = findReadableTouchEventNode(touchName)
+        cachedTouchNodePath = readableNode
         val devInputReadable = readableNode != null
+        if (readableNode != null) {
+            parseEvdevAxisRanges(readableNode)
+        }
+
+        val devInputWritable = readableNode != null && testNodeWritable(readableNode)
+        cachedEvdevWritable = devInputWritable
+        val uinputWritable = testNodeWritable("/dev/uinput")
+
         val rootAvailable = listOf(
             "/system/bin/su",
             "/system/xbin/su",
@@ -119,16 +174,19 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
             "/su/bin/su"
         ).any { path -> runCatching { File(path).exists() }.getOrDefault(false) }
 
-        val accessSummary = if (devInputReadable) {
-            "evdev readable ($readableNode)"
-        } else {
-            "/dev/input SELinux-blocked for uid 2000"
+        val accessSummary = when {
+            devInputWritable -> "evdev RW ($readableNode • maxSlot=$cachedEvdevMaxSlot • X=${cachedTouchMaxX.toInt()} Y=${cachedTouchMaxY.toInt()})"
+            devInputReadable && uinputWritable -> "evdev RO ($readableNode) • /dev/uinput RW"
+            devInputReadable -> "evdev RO ($readableNode) • write blocked by SELinux"
+            else -> "/dev/input SELinux-blocked for uid 2000"
         }
 
         return JSONObject().apply {
             put("touchDeviceId", touchId)
             put("touchDeviceName", touchName)
             put("devInputReadable", devInputReadable)
+            put("devInputWritable", devInputWritable)
+            put("uinputWritable", uinputWritable)
             put("rootAvailable", rootAvailable)
             put("touchMonitorRunning", monitorRunning.get())
             put("note", "$touchName (id=$touchId) • $accessSummary")
@@ -139,13 +197,8 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         if (monitorRunning.get()) return true
         val touchDevice = findPrimaryTouchDevice()
         val node = findReadableTouchEventNode(touchDevice?.name ?: "") ?: return false
-
-        touchDevice?.getMotionRange(MotionEvent.AXIS_X)?.let {
-            if (it.max > 0f) cachedTouchMaxX = it.max
-        }
-        touchDevice?.getMotionRange(MotionEvent.AXIS_Y)?.let {
-            if (it.max > 0f) cachedTouchMaxY = it.max
-        }
+        cachedTouchNodePath = node
+        parseEvdevAxisRanges(node)
 
         return try {
             val proc = ProcessBuilder("getevent", "-lt", node)
@@ -221,14 +274,250 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
 
     override fun readLatestFingerState(): String {
         val downFlag = if (fingerDown) 1 else 0
-        val nx = if (cachedTouchMaxX > 0f) (fingerX / cachedTouchMaxX).coerceIn(0f, 1f) else fingerX
-        val ny = if (cachedTouchMaxY > 0f) (fingerY / cachedTouchMaxY).coerceIn(0f, 1f) else fingerY
+        val spanX = (cachedTouchMaxX - cachedTouchMinX).coerceAtLeast(1f)
+        val spanY = (cachedTouchMaxY - cachedTouchMinY).coerceAtLeast(1f)
+        val nx = ((fingerX - cachedTouchMinX) / spanX).coerceIn(0f, 1f)
+        val ny = ((fingerY - cachedTouchMinY) / spanY).coerceIn(0f, 1f)
         return "$downFlag,$nx,$ny,$fingerUpdatedMs"
+    }
+
+    override fun injectEvdevTap(
+        screenX: Float,
+        screenY: Float,
+        screenW: Int,
+        screenH: Int,
+        holdMs: Long
+    ): Boolean {
+        val node = cachedTouchNodePath ?: return false
+        if (!cachedEvdevWritable) return false
+        val macroSlot = cachedEvdevMaxSlot.coerceIn(2, 9)
+        val tid = trackingIdSeq.incrementAndGet().let { if (it > 65000) 9000 else it }
+        val rx = scaleScreenToEvdevX(screenX, screenW)
+        val ry = scaleScreenToEvdevY(screenY, screenH)
+
+        return try {
+            FileOutputStream(node, true).use { fos ->
+                val downEvents = mutableListOf(
+                    Triple(EV_ABS, ABS_MT_SLOT, macroSlot),
+                    Triple(EV_ABS, ABS_MT_TRACKING_ID, tid),
+                    Triple(EV_ABS, ABS_MT_POSITION_X, rx),
+                    Triple(EV_ABS, ABS_MT_POSITION_Y, ry)
+                )
+                if (evdevSupportsTouchMajor) {
+                    downEvents.add(Triple(EV_ABS, ABS_MT_TOUCH_MAJOR, 12))
+                }
+                if (evdevSupportsPressure) {
+                    downEvents.add(Triple(EV_ABS, ABS_MT_PRESSURE, 64))
+                }
+                val sentBtnTouchDown = !fingerDown
+                if (sentBtnTouchDown) {
+                    downEvents.add(Triple(EV_KEY, BTN_TOUCH, 1))
+                    downEvents.add(Triple(EV_KEY, BTN_TOOL_FINGER, 1))
+                }
+                downEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                if (fingerDown) {
+                    downEvents.add(Triple(EV_ABS, ABS_MT_SLOT, 0))
+                    downEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                }
+                fos.write(encodeInputEvents(downEvents))
+                fos.flush()
+
+                if (holdMs > 0) {
+                    Thread.sleep(holdMs.coerceIn(10L, 1500L))
+                }
+
+                val upEvents = mutableListOf(
+                    Triple(EV_ABS, ABS_MT_SLOT, macroSlot),
+                    Triple(EV_ABS, ABS_MT_TRACKING_ID, -1)
+                )
+                if (!fingerDown && sentBtnTouchDown) {
+                    upEvents.add(Triple(EV_KEY, BTN_TOUCH, 0))
+                    upEvents.add(Triple(EV_KEY, BTN_TOOL_FINGER, 0))
+                }
+                upEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                if (fingerDown) {
+                    upEvents.add(Triple(EV_ABS, ABS_MT_SLOT, 0))
+                    upEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                }
+                fos.write(encodeInputEvents(upEvents))
+                fos.flush()
+            }
+            lastInjectDiagnostic = "evdev Slot$macroSlot tap OK ($rx,$ry) on $node"
+            true
+        } catch (t: Throwable) {
+            lastInjectDiagnostic = "evdev write failed: ${t.javaClass.simpleName}: ${t.message}"
+            cachedEvdevWritable = false
+            false
+        }
+    }
+
+    override fun injectEvdevSwipe(
+        sx: Float,
+        sy: Float,
+        ex: Float,
+        ey: Float,
+        screenW: Int,
+        screenH: Int,
+        durationMs: Long,
+        steps: Int
+    ): Boolean {
+        val node = cachedTouchNodePath ?: return false
+        if (!cachedEvdevWritable) return false
+        val macroSlot = cachedEvdevMaxSlot.coerceIn(2, 9)
+        val tid = trackingIdSeq.incrementAndGet().let { if (it > 65000) 9000 else it }
+        val safeSteps = steps.coerceIn(4, 100)
+        val stepDelay = (durationMs / safeSteps).coerceAtLeast(4L)
+
+        return try {
+            FileOutputStream(node, true).use { fos ->
+                val startRx = scaleScreenToEvdevX(sx, screenW)
+                val startRy = scaleScreenToEvdevY(sy, screenH)
+                val sentBtnTouchDown = !fingerDown
+                val downEvents = mutableListOf(
+                    Triple(EV_ABS, ABS_MT_SLOT, macroSlot),
+                    Triple(EV_ABS, ABS_MT_TRACKING_ID, tid),
+                    Triple(EV_ABS, ABS_MT_POSITION_X, startRx),
+                    Triple(EV_ABS, ABS_MT_POSITION_Y, startRy)
+                )
+                if (evdevSupportsTouchMajor) downEvents.add(Triple(EV_ABS, ABS_MT_TOUCH_MAJOR, 12))
+                if (evdevSupportsPressure) downEvents.add(Triple(EV_ABS, ABS_MT_PRESSURE, 64))
+                if (sentBtnTouchDown) {
+                    downEvents.add(Triple(EV_KEY, BTN_TOUCH, 1))
+                    downEvents.add(Triple(EV_KEY, BTN_TOOL_FINGER, 1))
+                }
+                downEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                if (fingerDown) {
+                    downEvents.add(Triple(EV_ABS, ABS_MT_SLOT, 0))
+                    downEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                }
+                fos.write(encodeInputEvents(downEvents))
+                fos.flush()
+
+                for (i in 1..safeSteps) {
+                    Thread.sleep(stepDelay)
+                    val t = i.toFloat() / safeSteps.toFloat()
+                    val cx = sx + (ex - sx) * t
+                    val cy = sy + (ey - sy) * t
+                    val stepEvents = mutableListOf(
+                        Triple(EV_ABS, ABS_MT_SLOT, macroSlot),
+                        Triple(EV_ABS, ABS_MT_POSITION_X, scaleScreenToEvdevX(cx, screenW)),
+                        Triple(EV_ABS, ABS_MT_POSITION_Y, scaleScreenToEvdevY(cy, screenH)),
+                        Triple(EV_SYN, SYN_REPORT, 0)
+                    )
+                    if (fingerDown) {
+                        stepEvents.add(Triple(EV_ABS, ABS_MT_SLOT, 0))
+                        stepEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                    }
+                    fos.write(encodeInputEvents(stepEvents))
+                    fos.flush()
+                }
+
+                val upEvents = mutableListOf(
+                    Triple(EV_ABS, ABS_MT_SLOT, macroSlot),
+                    Triple(EV_ABS, ABS_MT_TRACKING_ID, -1)
+                )
+                if (!fingerDown && sentBtnTouchDown) {
+                    upEvents.add(Triple(EV_KEY, BTN_TOUCH, 0))
+                    upEvents.add(Triple(EV_KEY, BTN_TOOL_FINGER, 0))
+                }
+                upEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                if (fingerDown) {
+                    upEvents.add(Triple(EV_ABS, ABS_MT_SLOT, 0))
+                    upEvents.add(Triple(EV_SYN, SYN_REPORT, 0))
+                }
+                fos.write(encodeInputEvents(upEvents))
+                fos.flush()
+            }
+            lastInjectDiagnostic = "evdev Slot$macroSlot swipe OK on $node"
+            true
+        } catch (t: Throwable) {
+            lastInjectDiagnostic = "evdev swipe failed: ${t.javaClass.simpleName}: ${t.message}"
+            cachedEvdevWritable = false
+            false
+        }
     }
 
     override fun destroy() {
         stopTouchMonitor()
         exitProcess(0)
+    }
+
+    private fun scaleScreenToEvdevX(x: Float, screenW: Int): Int {
+        val w = screenW.coerceAtLeast(1).toFloat()
+        val norm = (x / w).coerceIn(0f, 1f)
+        return (cachedTouchMinX + norm * (cachedTouchMaxX - cachedTouchMinX)).roundToInt()
+    }
+
+    private fun scaleScreenToEvdevY(y: Float, screenH: Int): Int {
+        val h = screenH.coerceAtLeast(1).toFloat()
+        val norm = (y / h).coerceIn(0f, 1f)
+        return (cachedTouchMinY + norm * (cachedTouchMaxY - cachedTouchMinY)).roundToInt()
+    }
+
+    private fun encodeInputEvents(events: List<Triple<Int, Int, Int>>): ByteArray {
+        val is64 = runCatching { android.os.Process.is64Bit() }.getOrDefault(true)
+        val stride = if (is64) 24 else 16
+        val buf = ByteBuffer.allocate(events.size * stride).order(ByteOrder.LITTLE_ENDIAN)
+        for ((type, code, value) in events) {
+            if (is64) {
+                buf.putLong(0L) // tv_sec
+                buf.putLong(0L) // tv_usec
+            } else {
+                buf.putInt(0)
+                buf.putInt(0)
+            }
+            buf.putShort(type.toShort())
+            buf.putShort(code.toShort())
+            buf.putInt(value)
+        }
+        return buf.array()
+    }
+
+    private fun testNodeWritable(path: String): Boolean {
+        return runCatching {
+            FileOutputStream(File(path), true).use { true }
+        }.getOrDefault(false)
+    }
+
+    private fun parseEvdevAxisRanges(nodePath: String) {
+        runCatching {
+            val proc = ProcessBuilder("getevent", "-p", nodePath)
+                .redirectErrorStream(true)
+                .start()
+            val out = BufferedReader(InputStreamReader(proc.inputStream)).use { it.readText() }
+            proc.waitFor()
+            val rangeRegex = Regex("""min\s+(-?\d+),\s+max\s+(-?\d+)""")
+            for (line in out.lines()) {
+                val trimmed = line.trim()
+                val match = rangeRegex.find(trimmed)
+                when {
+                    trimmed.startsWith("002f") && match != null -> {
+                        val maxSlot = match.groupValues[2].toIntOrNull()
+                        if (maxSlot != null && maxSlot >= 2) {
+                            cachedEvdevMaxSlot = maxSlot
+                        }
+                    }
+                    trimmed.startsWith("0030") -> evdevSupportsTouchMajor = true
+                    trimmed.startsWith("003a") -> evdevSupportsPressure = true
+                    trimmed.startsWith("0035") && match != null -> {
+                        val minX = match.groupValues[1].toFloatOrNull()
+                        val maxX = match.groupValues[2].toFloatOrNull()
+                        if (minX != null && maxX != null && maxX > minX) {
+                            cachedTouchMinX = minX
+                            cachedTouchMaxX = maxX
+                        }
+                    }
+                    trimmed.startsWith("0036") && match != null -> {
+                        val minY = match.groupValues[1].toFloatOrNull()
+                        val maxY = match.groupValues[2].toFloatOrNull()
+                        if (minY != null && maxY != null && maxY > minY) {
+                            cachedTouchMinY = minY
+                            cachedTouchMaxY = maxY
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun findPrimaryTouchDevice(): InputDevice? {
@@ -274,5 +563,17 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
 
     companion object {
         private const val TAG = "ShizuMacroUserService"
+        private const val EV_SYN = 0x00
+        private const val EV_KEY = 0x01
+        private const val EV_ABS = 0x03
+        private const val SYN_REPORT = 0x00
+        private const val BTN_TOOL_FINGER = 0x145
+        private const val BTN_TOUCH = 0x14a
+        private const val ABS_MT_SLOT = 0x2f
+        private const val ABS_MT_TOUCH_MAJOR = 0x30
+        private const val ABS_MT_POSITION_X = 0x35
+        private const val ABS_MT_POSITION_Y = 0x36
+        private const val ABS_MT_TRACKING_ID = 0x39
+        private const val ABS_MT_PRESSURE = 0x3a
     }
 }
