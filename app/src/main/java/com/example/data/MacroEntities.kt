@@ -14,6 +14,7 @@ data class MacroEntity(
     val injectionMode: String = "TOUCHSCREEN",
     val touchGuardPolicy: String = "OFF",
     val stepsJson: String,
+    val functionsJson: String = "[]",
     val createdAt: Long,
     val updatedAt: Long
 )

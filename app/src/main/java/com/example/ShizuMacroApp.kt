@@ -4,6 +4,7 @@ import android.app.Application
 import com.example.data.AppDatabase
 import com.example.data.MacroRepository
 import com.example.engine.MacroInterpreter
+import com.example.model.ScriptClipboard
 import com.example.service.OverlayCoordinator
 import com.example.shizuku.ShizukuInputBridge
 import com.example.vision.ScreenDetector
@@ -22,6 +23,8 @@ class ShizuMacroApp : Application() {
         private set
     lateinit var overlayCoordinator: OverlayCoordinator
         private set
+    lateinit var scriptClipboard: ScriptClipboard
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -30,6 +33,7 @@ class ShizuMacroApp : Application() {
         shizukuBridge = ShizukuInputBridge(this)
         screenDetector = ScreenDetector(this)
         overlayCoordinator = OverlayCoordinator()
+        scriptClipboard = ScriptClipboard()
         interpreter = MacroInterpreter(repository, shizukuBridge, screenDetector, overlayCoordinator)
 
         shizukuBridge.registerListeners()

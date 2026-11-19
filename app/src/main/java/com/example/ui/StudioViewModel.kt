@@ -60,6 +60,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val screenDetector = app.screenDetector
     val interpreter = app.interpreter
     val overlayCoordinator = app.overlayCoordinator
+    val scriptClipboard = app.scriptClipboard
 
     val macros: StateFlow<List<MacroDefinition>> = repository.macros
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -75,12 +76,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val screenCaptureActive: StateFlow<Boolean> = screenDetector.isActive
     val executionState: StateFlow<RuntimeExecutionState> = interpreter.state
     val overlayState: StateFlow<OverlayUiState> = overlayCoordinator.overlayState
+    val clipboardItem = scriptClipboard.current
 
     private val _hasOverlayPermission = MutableStateFlow(canDrawOverlays())
     val hasOverlayPermission: StateFlow<Boolean> = _hasOverlayPermission.asStateFlow()
 
     private val _notices = MutableSharedFlow<UiNotice>(extraBufferCapacity = 8)
     val notices: SharedFlow<UiNotice> = _notices.asSharedFlow()
+
+    fun notifyMessage(text: String, isError: Boolean = false) {
+        _notices.tryEmit(UiNotice.Message(text, isError))
+    }
 
     init {
         viewModelScope.launch {
@@ -231,7 +237,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun startScreenPicker(
         macro: MacroDefinition,
         step: MacroStep,
-        modeOverride: PickerMode? = null
+        modeOverride: PickerMode? = null,
+        functionId: String? = null
     ) {
         if (!canDrawOverlays()) {
             _notices.tryEmit(UiNotice.Message("Grant 'Display over other apps' to use the visual picker.", isError = true))
@@ -242,6 +249,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 macroId = macro.id,
                 stepId = step.id,
                 mode = modeOverride ?: PickerMode.PICK_TAP,
+                functionId = functionId,
                 initialX = step.x,
                 initialY = step.y,
                 returnToAppOnComplete = true
@@ -250,6 +258,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 macroId = macro.id,
                 stepId = step.id,
                 mode = modeOverride ?: PickerMode.PICK_SWIPE,
+                functionId = functionId,
                 initialX = step.startX,
                 initialY = step.startY,
                 initialEndX = step.endX,
@@ -260,6 +269,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 macroId = macro.id,
                 stepId = step.id,
                 mode = modeOverride ?: PickerMode.PICK_COLOR,
+                functionId = functionId,
                 initialX = step.x.toFloat(),
                 initialY = step.y.toFloat(),
                 returnToAppOnComplete = true
@@ -268,6 +278,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 macroId = macro.id,
                 stepId = step.id,
                 mode = modeOverride ?: PickerMode.PICK_TEMPLATE_CROP,
+                functionId = functionId,
                 initialLeft = step.searchLeft,
                 initialTop = step.searchTop,
                 initialRight = step.searchRight,
@@ -379,6 +390,34 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 _notices.tryEmit(UiNotice.Message("Imported $count macro(s) from JSON"))
             }.onFailure { err ->
                 _notices.tryEmit(UiNotice.Message("Invalid macro JSON: ${err.message}", isError = true))
+            }
+        }
+    }
+
+    fun cropTemplate(
+        templateId: String,
+        trimLeft: Int,
+        trimTop: Int,
+        trimRight: Int,
+        trimBottom: Int,
+        saveAsNew: Boolean,
+        onCropped: (TemplateAssetEntity) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val result = repository.cropTemplate(
+                templateId = templateId,
+                trimLeft = trimLeft,
+                trimTop = trimTop,
+                trimRight = trimRight,
+                trimBottom = trimBottom,
+                saveAsNew = saveAsNew
+            )
+            if (result != null) {
+                onCropped(result)
+                val action = if (saveAsNew) "Saved cropped copy" else "Cropped"
+                _notices.tryEmit(UiNotice.Message("$action '${result.name}' (${result.width}×${result.height} px)"))
+            } else {
+                _notices.tryEmit(UiNotice.Message("Unable to crop template image", isError = true))
             }
         }
     }

@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import android.view.KeyEvent
 import com.example.data.TemplateAssetEntity
 import com.example.model.BranchAction
+import com.example.model.CallFunctionStep
 import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
@@ -75,6 +76,7 @@ import com.example.model.KeyPressStep
 import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
+import com.example.model.MacroFunction
 import com.example.model.MacroStep
 import com.example.model.SetVariableStep
 import com.example.model.StopStep
@@ -84,6 +86,8 @@ import com.example.model.TapStep
 import com.example.model.VarComparator
 import com.example.model.VarOperation
 import com.example.service.PickerMode
+import com.example.ui.components.TemplateCropEditorDialog
+import com.example.ui.components.TemplateThumbnailPreview
 import com.example.ui.theme.AmberLogic
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldRun
@@ -100,6 +104,7 @@ import java.util.UUID
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddStepBottomSheet(
+    functions: List<MacroFunction> = emptyList(),
     onDismiss: () -> Unit,
     onAddSteps: (List<MacroStep>) -> Unit
 ) {
@@ -158,7 +163,29 @@ fun AddStepBottomSheet(
                 }
             }
 
-            StepCategorySection("LOGIC, LOOPS & VARIABLES", AmberLogic) {
+            StepCategorySection("LOGIC, FUNCTIONS & LOOPS", AmberLogic) {
+                AddNodeTile(
+                    "Call Function",
+                    if (functions.isEmpty()) {
+                        "Run a reusable chunk of steps (create one via + New Fn)"
+                    } else {
+                        "Run one of ${functions.size} function chunk(s) (${functions.joinToString(", ") { it.name }.take(36)})"
+                    },
+                    Icons.Default.Code,
+                    VioletVar
+                ) {
+                    val firstFn = functions.firstOrNull()
+                    onAddSteps(
+                        listOf(
+                            CallFunctionStep(
+                                label = firstFn?.let { "Call ${it.name}" } ?: "Call Function",
+                                functionId = firstFn?.id ?: "",
+                                functionName = firstFn?.name ?: "",
+                                repeatCount = 1
+                            )
+                        )
+                    )
+                }
                 AddNodeTile("Loop Block (Start + End)", "Repeat N times or while condition holds", Icons.Default.Loop, AmberLogic) {
                     val startId = UUID.randomUUID().toString()
                     onAddSteps(
@@ -239,8 +266,18 @@ private fun AddNodeTile(
 fun EditStepBottomSheet(
     step: MacroStep,
     allSteps: List<MacroStep>,
+    functions: List<MacroFunction> = emptyList(),
     templates: List<TemplateAssetEntity>,
     onPickOnScreen: (MacroStep, PickerMode) -> Unit,
+    onCropTemplate: (
+        templateId: String,
+        trimLeft: Int,
+        trimTop: Int,
+        trimRight: Int,
+        trimBottom: Int,
+        saveAsNew: Boolean,
+        onCropped: (TemplateAssetEntity) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
     onSave: (MacroStep) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -644,6 +681,7 @@ fun EditStepBottomSheet(
                 is IfImageStep -> {
                     var selectedTemplateId by remember(step) { mutableStateOf(step.templateId) }
                     var selectedTemplateName by remember(step) { mutableStateOf(step.templateName) }
+                    var showCropEditor by remember(step) { mutableStateOf(false) }
                     var sLeft by remember(step) { mutableStateOf(step.searchLeft) }
                     var sTop by remember(step) { mutableStateOf(step.searchTop) }
                     var sRight by remember(step) { mutableStateOf(step.searchRight) }
@@ -654,6 +692,8 @@ fun EditStepBottomSheet(
                     var thenJumpId by remember(step) { mutableStateOf(step.thenJumpStepId) }
                     var elseAction by remember(step) { mutableStateOf(step.elseAction) }
                     var elseJumpId by remember(step) { mutableStateOf(step.elseJumpStepId) }
+
+                    val selectedTemplate = templates.find { it.id == selectedTemplateId }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
@@ -700,6 +740,13 @@ fun EditStepBottomSheet(
                         }
                     }
 
+                    if (selectedTemplate != null) {
+                        TemplateThumbnailPreview(
+                            template = selectedTemplate,
+                            onEditCrop = { showCropEditor = true }
+                        )
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -738,6 +785,20 @@ fun EditStepBottomSheet(
                                 )
                             }
                         }
+                    }
+
+                    if (showCropEditor && selectedTemplate != null) {
+                        TemplateCropEditorDialog(
+                            template = selectedTemplate,
+                            onApplyCrop = { l, t, r, b, saveAsNew ->
+                                onCropTemplate(selectedTemplate.id, l, t, r, b, saveAsNew) { cropped ->
+                                    selectedTemplateId = cropped.id
+                                    selectedTemplateName = cropped.name
+                                }
+                                showCropEditor = false
+                            },
+                            onDismiss = { showCropEditor = false }
+                        )
                     }
 
                     NumField("Min Confidence (%)", confStr, { confStr = it }, Modifier.fillMaxWidth())
@@ -843,6 +904,52 @@ fun EditStepBottomSheet(
                     }
                     SaveStepActions(onDismiss) {
                         onSave(step.copy(label = label.ifBlank { "Jump" }, targetStepId = targetId))
+                    }
+                }
+
+                is CallFunctionStep -> {
+                    var selectedFnId by remember(step) { mutableStateOf(step.functionId) }
+                    var selectedFnName by remember(step) { mutableStateOf(step.functionName) }
+                    var repeatStr by remember(step) { mutableStateOf(step.repeatCount.coerceAtLeast(1).toString()) }
+
+                    Text("Target Function", style = MaterialTheme.typography.labelMedium, color = VioletVar)
+                    if (functions.isEmpty()) {
+                        Text(
+                            text = "No functions created yet. Tap '+ New Fn' in the editor scope bar to create reusable chunks of steps.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary
+                        )
+                    } else {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            functions.forEach { fn ->
+                                FilterChip(
+                                    selected = selectedFnId == fn.id,
+                                    onClick = {
+                                        selectedFnId = fn.id
+                                        selectedFnName = fn.name
+                                        if (label.startsWith("Call ") || label == "Call Function") {
+                                            label = "Call ${fn.name}"
+                                        }
+                                    },
+                                    label = { Text("fn ${fn.name} (${fn.steps.size})") }
+                                )
+                            }
+                        }
+                    }
+
+                    NumField("Repeat Calls", repeatStr, { repeatStr = it }, Modifier.fillMaxWidth())
+
+                    SaveStepActions(onDismiss) {
+                        val resolvedFn = functions.find { it.id == selectedFnId }
+                        val resolvedName = resolvedFn?.name ?: selectedFnName
+                        onSave(
+                            step.copy(
+                                label = label.ifBlank { if (resolvedName.isNotBlank()) "Call $resolvedName" else "Call Function" },
+                                functionId = resolvedFn?.id ?: selectedFnId,
+                                functionName = resolvedName,
+                                repeatCount = (repeatStr.toIntOrNull() ?: step.repeatCount).coerceIn(1, 999)
+                            )
+                        )
                     }
                 }
 

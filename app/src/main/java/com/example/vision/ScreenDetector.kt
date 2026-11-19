@@ -54,6 +54,9 @@ class ScreenDetector(private val context: Context) {
     private var screenHeight: Int = 1920
     private var screenDensity: Int = 320
 
+    private val frameCacheLock = Any()
+    private var cachedFrame: Bitmap? = null
+
     private val _isActive = MutableStateFlow(false)
     val isActive: StateFlow<Boolean> = _isActive.asStateFlow()
 
@@ -124,6 +127,10 @@ class ScreenDetector(private val context: Context) {
         virtualDisplay = null
         imageReader = null
         mediaProjection = null
+        synchronized(frameCacheLock) {
+            cachedFrame?.recycle()
+            cachedFrame = null
+        }
     }
 
     suspend fun captureLatestBitmap(): Bitmap? = withContext(Dispatchers.Default) {
@@ -132,7 +139,18 @@ class ScreenDetector(private val context: Context) {
             reader.acquireLatestImage()
         } catch (_: Throwable) {
             null
-        } ?: return@withContext null
+        }
+
+        if (image == null) {
+            return@withContext synchronized(frameCacheLock) {
+                val cached = cachedFrame
+                if (cached != null && !cached.isRecycled) {
+                    cached.copy(Bitmap.Config.ARGB_8888, false)
+                } else {
+                    null
+                }
+            }
+        }
 
         try {
             val plane = image.planes.firstOrNull() ?: return@withContext null
@@ -143,13 +161,18 @@ class ScreenDetector(private val context: Context) {
             val bitmapWidth = image.width + rowPadding / pixelStride
             val rawBitmap = Bitmap.createBitmap(bitmapWidth, image.height, Bitmap.Config.ARGB_8888)
             rawBitmap.copyPixelsFromBuffer(buffer)
-            if (bitmapWidth == image.width) {
+            val resultBitmap = if (bitmapWidth == image.width) {
                 rawBitmap
             } else {
                 val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, image.width, image.height)
                 rawBitmap.recycle()
                 cropped
             }
+            synchronized(frameCacheLock) {
+                cachedFrame?.recycle()
+                cachedFrame = resultBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            }
+            resultBitmap
         } catch (_: Throwable) {
             null
         } finally {

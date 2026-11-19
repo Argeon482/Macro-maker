@@ -45,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -68,6 +69,7 @@ class MacroOverlayService : Service() {
 
     private var pickerView: ComposeView? = null
     private var pickerLifecycle: OverlayLifecycleOwner? = null
+    private val pickerSnapshotFlow = MutableStateFlow<Bitmap?>(null)
 
     private var passThroughView: ComposeView? = null
     private var passThroughParams: WindowManager.LayoutParams? = null
@@ -394,6 +396,7 @@ class MacroOverlayService : Service() {
                 val macros by app.repository.macros.collectAsState(initial = emptyList())
                 val templates by app.repository.templates.collectAsState(initial = emptyList())
                 val captureActive by app.screenDetector.isActive.collectAsState()
+                val clipboardItem by app.scriptClipboard.current.collectAsState()
 
                 val activeMacro = macros.find { it.id == overlayState.activeMacroId } ?: macros.firstOrNull()
 
@@ -401,6 +404,8 @@ class MacroOverlayService : Service() {
                     macros = macros,
                     activeMacro = activeMacro,
                     initialEditingStepId = overlayState.studioEditingStepId,
+                    initialActiveFunctionId = overlayState.studioActiveFunctionId,
+                    clipboardItem = clipboardItem,
                     templates = templates,
                     screenCaptureActive = captureActive,
                     onSelectMacro = { selected ->
@@ -423,14 +428,33 @@ class MacroOverlayService : Service() {
                             app.overlayCoordinator.setLoadedMacro(updated.id, updated.name)
                         }
                     },
-                    onLaunchPicker = { macro, step, mode ->
+                    onCopyStep = { step -> app.scriptClipboard.copyStep(step) },
+                    onCopyFunction = { fn -> app.scriptClipboard.copyFunction(fn) },
+                    onClearClipboard = { app.scriptClipboard.clear() },
+                    onLaunchPicker = { macro, step, mode, functionId ->
                         val request = buildPickerRequest(
                             macroId = macro.id,
                             step = step,
                             mode = mode,
+                            functionId = functionId,
                             returnToAppOnComplete = false
                         )
                         app.overlayCoordinator.startPicker(request)
+                    },
+                    onCropTemplate = { templateId, l, t, r, b, saveAsNew, onCropped ->
+                        serviceScope.launch {
+                            val cropped = app.repository.cropTemplate(
+                                templateId = templateId,
+                                trimLeft = l,
+                                trimTop = t,
+                                trimRight = r,
+                                trimBottom = b,
+                                saveAsNew = saveAsNew
+                            )
+                            if (cropped != null) {
+                                onCropped(cropped)
+                            }
+                        }
                     },
                     onOpenPins = {
                         app.overlayCoordinator.setPinsOverlayOpen(true)
@@ -461,9 +485,26 @@ class MacroOverlayService : Service() {
         studioLifecycle = null
     }
 
+    private fun captureCleanPickerSnapshot() {
+        if (!app.screenDetector.isActive.value) return
+        serviceScope.launch {
+            val prevPickerVis = pickerView?.visibility
+            val prevDockVis = dockView?.visibility
+            pickerView?.visibility = View.INVISIBLE
+            dockView?.visibility = View.INVISIBLE
+            delay(130L)
+            val frame = app.screenDetector.captureLatestBitmap()
+            if (prevDockVis != null) dockView?.visibility = prevDockVis
+            if (prevPickerVis != null) pickerView?.visibility = prevPickerVis
+            if (frame != null) {
+                pickerSnapshotFlow.value = frame
+            }
+        }
+    }
+
     private fun showPickerOverlay() {
         if (pickerView != null) return
-        if (app.overlayCoordinator.overlayState.value.pendingPickerRequest == null) return
+        val initialReq = app.overlayCoordinator.overlayState.value.pendingPickerRequest ?: return
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -481,32 +522,47 @@ class MacroOverlayService : Service() {
             setContent {
                 val captureActive by app.screenDetector.isActive.collectAsState()
                 val overlayState by app.overlayCoordinator.overlayState.collectAsState()
+                val snapshotBitmap by pickerSnapshotFlow.collectAsState()
                 val req = overlayState.pendingPickerRequest
 
                 if (req != null) {
                     val macroFlow = remember(req.macroId) { app.repository.observeMacro(req.macroId) }
                     val macro by macroFlow.collectAsState(initial = null)
-                    val targetSubtitle = remember(macro, req.stepId, req.mode) {
+                    val targetSubtitle = remember(macro, req.stepId, req.functionId, req.mode) {
                         if (req.stepId.isBlank()) {
                             "Creates new Tap step in ${macro?.name ?: overlayState.activeMacroName}"
                         } else {
-                            val idx = macro?.steps?.indexOfFirst { it.id == req.stepId } ?: -1
-                            val step = macro?.steps?.getOrNull(idx)
-                            if (step != null) "Updating #${idx + 1} ${step.label}" else null
+                            val fn = req.functionId?.let { fid -> macro?.functions?.find { it.id == fid } }
+                                ?: macro?.functions?.find { f -> f.steps.any { it.id == req.stepId } }
+                            if (fn != null) {
+                                val idx = fn.steps.indexOfFirst { it.id == req.stepId }
+                                val step = fn.steps.getOrNull(idx)
+                                if (step != null) "fn ${fn.name} • #${idx + 1} ${step.label}" else "fn ${fn.name}"
+                            } else {
+                                val idx = macro?.steps?.indexOfFirst { it.id == req.stepId } ?: -1
+                                val step = macro?.steps?.getOrNull(idx)
+                                if (step != null) "Updating #${idx + 1} ${step.label}" else null
+                            }
                         }
                     }
 
                     TargetPickerOverlay(
                         request = req,
                         screenCaptureActive = captureActive,
+                        snapshotBitmap = snapshotBitmap,
                         targetSubtitle = targetSubtitle,
+                        onRefreshSnapshot = { captureCleanPickerSnapshot() },
+                        onRequestVision = {
+                            app.overlayCoordinator.setPickerPassThrough(true)
+                            requestVisionConsent()
+                        },
                         onSwitchApp = { updatedDraft ->
                             app.overlayCoordinator.updatePendingPickerRequest(updatedDraft)
                             app.overlayCoordinator.setPickerPassThrough(true)
                         },
                         onConfirmTap = { x, y ->
                             serviceScope.launch {
-                                val result = PickerResult.TapPicked(req.macroId, req.stepId, x, y)
+                                val result = PickerResult.TapPicked(req.macroId, req.stepId, x, y, req.functionId)
                                 val savedStepId = persistPickerResult(result)
                                 app.overlayCoordinator.publishPickerResult(result)
                                 handlePostPickNavigation(req, savedStepId)
@@ -514,27 +570,31 @@ class MacroOverlayService : Service() {
                         },
                         onConfirmSwipe = { sx, sy, ex, ey ->
                             serviceScope.launch {
-                                val result = PickerResult.SwipePicked(req.macroId, req.stepId, sx, sy, ex, ey)
+                                val result = PickerResult.SwipePicked(req.macroId, req.stepId, sx, sy, ex, ey, req.functionId)
                                 val savedStepId = persistPickerResult(result)
                                 app.overlayCoordinator.publishPickerResult(result)
                                 handlePostPickNavigation(req, savedStepId)
                             }
                         },
-                        onConfirmColor = { x, y ->
+                        onConfirmColor = { x, y, sampledHex ->
                             serviceScope.launch {
-                                removePickerOverlay()
-                                delay(140L)
-                                val frame = app.screenDetector.captureLatestBitmap()
-                                val hex = if (frame != null) {
-                                    val safeX = x.coerceIn(0, frame.width - 1)
-                                    val safeY = y.coerceIn(0, frame.height - 1)
-                                    val pixel = frame.getPixel(safeX, safeY)
-                                    frame.recycle()
-                                    String.format("#%06X", 0xFFFFFF and pixel)
+                                val hex = if (!sampledHex.isNullOrBlank()) {
+                                    sampledHex
                                 } else {
-                                    "#10B981"
+                                    removePickerOverlay()
+                                    delay(140L)
+                                    val frame = app.screenDetector.captureLatestBitmap()
+                                    if (frame != null) {
+                                        val safeX = x.coerceIn(0, frame.width - 1)
+                                        val safeY = y.coerceIn(0, frame.height - 1)
+                                        val pixel = frame.getPixel(safeX, safeY)
+                                        frame.recycle()
+                                        String.format("#%06X", 0xFFFFFF and pixel)
+                                    } else {
+                                        "#10B981"
+                                    }
                                 }
-                                val result = PickerResult.ColorPicked(req.macroId, req.stepId, x, y, hex)
+                                val result = PickerResult.ColorPicked(req.macroId, req.stepId, x, y, hex, req.functionId)
                                 val savedStepId = persistPickerResult(result)
                                 app.overlayCoordinator.publishPickerResult(result)
                                 handlePostPickNavigation(req, savedStepId)
@@ -563,7 +623,8 @@ class MacroOverlayService : Service() {
                                         stepId = req.stepId,
                                         templateId = saved.id,
                                         templateName = saved.name,
-                                        region = Rect(safeL, safeT, safeL + safeW, safeT + safeH)
+                                        region = Rect(safeL, safeT, safeL + safeW, safeT + safeH),
+                                        functionId = req.functionId
                                     )
                                 } else {
                                     app.repository.appendLog(
@@ -578,7 +639,8 @@ class MacroOverlayService : Service() {
                                         stepId = req.stepId,
                                         templateId = "",
                                         templateName = "No Capture Active",
-                                        region = rect
+                                        region = rect,
+                                        functionId = req.functionId
                                     )
                                 }
                                 val savedStepId = persistPickerResult(result)
@@ -591,7 +653,8 @@ class MacroOverlayService : Service() {
                                 val result = PickerResult.RoiPicked(
                                     macroId = req.macroId,
                                     stepId = req.stepId,
-                                    region = Rect(left, top, right, bottom)
+                                    region = Rect(left, top, right, bottom),
+                                    functionId = req.functionId
                                 )
                                 val savedStepId = persistPickerResult(result)
                                 app.overlayCoordinator.publishPickerResult(result)
@@ -610,6 +673,10 @@ class MacroOverlayService : Service() {
         pickerLifecycle = lifecycleOwner
         pickerView = view
         runCatching { windowManager.addView(view, params) }
+
+        if (initialReq.mode == PickerMode.PICK_COLOR) {
+            captureCleanPickerSnapshot()
+        }
     }
 
     private fun removePickerOverlay() {
@@ -617,6 +684,7 @@ class MacroOverlayService : Service() {
         pickerLifecycle?.onDestroy()
         pickerView = null
         pickerLifecycle = null
+        pickerSnapshotFlow.value = null
     }
 
     private fun showPassThroughOverlay() {
@@ -780,53 +848,68 @@ class MacroOverlayService : Service() {
             return newStep.id
         }
 
+        fun applyResultToStep(step: MacroStep): MacroStep = when (result) {
+            is PickerResult.TapPicked -> if (step is TapStep) {
+                step.copy(x = result.x, y = result.y)
+            } else step
+
+            is PickerResult.SwipePicked -> if (step is SwipeStep) {
+                step.copy(
+                    startX = result.startX,
+                    startY = result.startY,
+                    endX = result.endX,
+                    endY = result.endY
+                )
+            } else step
+
+            is PickerResult.ColorPicked -> if (step is IfColorStep) {
+                step.copy(x = result.x, y = result.y, targetHexColor = result.hexColor)
+            } else step
+
+            is PickerResult.TemplatePicked -> if (step is IfImageStep) {
+                val hasExistingRoi = step.searchRight > step.searchLeft && step.searchBottom > step.searchTop
+                step.copy(
+                    templateId = result.templateId.ifBlank { step.templateId },
+                    templateName = result.templateName,
+                    searchLeft = if (hasExistingRoi) step.searchLeft else (result.region.left - 32).coerceAtLeast(0),
+                    searchTop = if (hasExistingRoi) step.searchTop else (result.region.top - 32).coerceAtLeast(0),
+                    searchRight = if (hasExistingRoi) step.searchRight else result.region.right + 32,
+                    searchBottom = if (hasExistingRoi) step.searchBottom else result.region.bottom + 32
+                )
+            } else step
+
+            is PickerResult.RoiPicked -> if (step is IfImageStep) {
+                step.copy(
+                    searchLeft = result.region.left,
+                    searchTop = result.region.top,
+                    searchRight = result.region.right,
+                    searchBottom = result.region.bottom
+                )
+            } else step
+        }
+
         var matched = false
         val updatedSteps = macro.steps.map { step ->
             if (step.id != result.stepId) return@map step
             matched = true
-            when (result) {
-                is PickerResult.TapPicked -> if (step is TapStep) {
-                    step.copy(x = result.x, y = result.y)
-                } else step
-
-                is PickerResult.SwipePicked -> if (step is SwipeStep) {
-                    step.copy(
-                        startX = result.startX,
-                        startY = result.startY,
-                        endX = result.endX,
-                        endY = result.endY
-                    )
-                } else step
-
-                is PickerResult.ColorPicked -> if (step is IfColorStep) {
-                    step.copy(x = result.x, y = result.y, targetHexColor = result.hexColor)
-                } else step
-
-                is PickerResult.TemplatePicked -> if (step is IfImageStep) {
-                    val hasExistingRoi = step.searchRight > step.searchLeft && step.searchBottom > step.searchTop
-                    step.copy(
-                        templateId = result.templateId.ifBlank { step.templateId },
-                        templateName = result.templateName,
-                        searchLeft = if (hasExistingRoi) step.searchLeft else (result.region.left - 32).coerceAtLeast(0),
-                        searchTop = if (hasExistingRoi) step.searchTop else (result.region.top - 32).coerceAtLeast(0),
-                        searchRight = if (hasExistingRoi) step.searchRight else result.region.right + 32,
-                        searchBottom = if (hasExistingRoi) step.searchBottom else result.region.bottom + 32
-                    )
-                } else step
-
-                is PickerResult.RoiPicked -> if (step is IfImageStep) {
-                    step.copy(
-                        searchLeft = result.region.left,
-                        searchTop = result.region.top,
-                        searchRight = result.region.right,
-                        searchBottom = result.region.bottom
-                    )
-                } else step
+            applyResultToStep(step)
+        }
+        val updatedFunctions = macro.functions.map { fn ->
+            if (result.functionId != null && fn.id != result.functionId && fn.steps.none { it.id == result.stepId }) {
+                return@map fn
             }
+            var fnChanged = false
+            val nextFnSteps = fn.steps.map { step ->
+                if (step.id != result.stepId) return@map step
+                matched = true
+                fnChanged = true
+                applyResultToStep(step)
+            }
+            if (fnChanged) fn.copy(steps = nextFnSteps) else fn
         }
 
         if (matched) {
-            val updatedMacro = macro.copy(steps = updatedSteps)
+            val updatedMacro = macro.copy(steps = updatedSteps, functions = updatedFunctions)
             app.repository.saveMacro(updatedMacro)
             app.overlayCoordinator.setLoadedMacro(updatedMacro.id, updatedMacro.name)
         }
@@ -837,7 +920,11 @@ class MacroOverlayService : Service() {
         if (request.returnToAppOnComplete) {
             bringMainActivityToFront()
         } else if (!savedStepId.isNullOrBlank() && request.stepId.isNotBlank()) {
-            app.overlayCoordinator.setOverlayStudioOpen(true, editingStepId = savedStepId)
+            app.overlayCoordinator.setOverlayStudioOpen(
+                open = true,
+                editingStepId = savedStepId,
+                activeFunctionId = request.functionId
+            )
         }
     }
 
@@ -845,12 +932,14 @@ class MacroOverlayService : Service() {
         macroId: String,
         step: MacroStep,
         mode: PickerMode,
+        functionId: String? = null,
         returnToAppOnComplete: Boolean
     ): PickerRequest = when (step) {
         is TapStep -> PickerRequest(
             macroId = macroId,
             stepId = step.id,
             mode = mode,
+            functionId = functionId,
             initialX = step.x,
             initialY = step.y,
             returnToAppOnComplete = returnToAppOnComplete
@@ -859,6 +948,7 @@ class MacroOverlayService : Service() {
             macroId = macroId,
             stepId = step.id,
             mode = mode,
+            functionId = functionId,
             initialX = step.startX,
             initialY = step.startY,
             initialEndX = step.endX,
@@ -869,6 +959,7 @@ class MacroOverlayService : Service() {
             macroId = macroId,
             stepId = step.id,
             mode = mode,
+            functionId = functionId,
             initialX = step.x.toFloat(),
             initialY = step.y.toFloat(),
             returnToAppOnComplete = returnToAppOnComplete
@@ -877,6 +968,7 @@ class MacroOverlayService : Service() {
             macroId = macroId,
             stepId = step.id,
             mode = mode,
+            functionId = functionId,
             initialLeft = step.searchLeft,
             initialTop = step.searchTop,
             initialRight = step.searchRight,
@@ -887,6 +979,7 @@ class MacroOverlayService : Service() {
             macroId = macroId,
             stepId = step.id,
             mode = mode,
+            functionId = functionId,
             returnToAppOnComplete = returnToAppOnComplete
         )
     }

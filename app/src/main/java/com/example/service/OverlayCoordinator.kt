@@ -22,6 +22,7 @@ data class PickerRequest(
     val macroId: String,
     val stepId: String,
     val mode: PickerMode,
+    val functionId: String? = null,
     val initialX: Float = 540f,
     val initialY: Float = 960f,
     val initialEndX: Float = 540f,
@@ -36,12 +37,14 @@ data class PickerRequest(
 sealed interface PickerResult {
     val macroId: String
     val stepId: String
+    val functionId: String?
 
     data class TapPicked(
         override val macroId: String,
         override val stepId: String,
         val x: Float,
-        val y: Float
+        val y: Float,
+        override val functionId: String? = null
     ) : PickerResult
 
     data class SwipePicked(
@@ -50,7 +53,8 @@ sealed interface PickerResult {
         val startX: Float,
         val startY: Float,
         val endX: Float,
-        val endY: Float
+        val endY: Float,
+        override val functionId: String? = null
     ) : PickerResult
 
     data class ColorPicked(
@@ -58,7 +62,8 @@ sealed interface PickerResult {
         override val stepId: String,
         val x: Int,
         val y: Int,
-        val hexColor: String
+        val hexColor: String,
+        override val functionId: String? = null
     ) : PickerResult
 
     data class TemplatePicked(
@@ -66,13 +71,15 @@ sealed interface PickerResult {
         override val stepId: String,
         val templateId: String,
         val templateName: String,
-        val region: Rect
+        val region: Rect,
+        override val functionId: String? = null
     ) : PickerResult
 
     data class RoiPicked(
         override val macroId: String,
         override val stepId: String,
-        val region: Rect
+        val region: Rect,
+        override val functionId: String? = null
     ) : PickerResult
 }
 
@@ -85,6 +92,7 @@ data class OverlayUiState(
     val isPickerPassThrough: Boolean = false,
     val showOverlayStudio: Boolean = false,
     val studioEditingStepId: String? = null,
+    val studioActiveFunctionId: String? = null,
     val showPinsOverlay: Boolean = false
 )
 
@@ -115,6 +123,7 @@ class OverlayCoordinator {
                 activeMacroName = macroName ?: it.activeMacroName,
                 showOverlayStudio = if (!showing) false else it.showOverlayStudio,
                 studioEditingStepId = if (!showing) null else it.studioEditingStepId,
+                studioActiveFunctionId = if (!showing) null else it.studioActiveFunctionId,
                 showPinsOverlay = if (!showing) false else it.showPinsOverlay
             )
         }
@@ -126,11 +135,16 @@ class OverlayCoordinator {
         }
     }
 
-    fun setOverlayStudioOpen(open: Boolean, editingStepId: String? = null) {
+    fun setOverlayStudioOpen(
+        open: Boolean,
+        editingStepId: String? = null,
+        activeFunctionId: String? = null
+    ) {
         _overlayState.update {
             it.copy(
                 showOverlayStudio = open,
                 studioEditingStepId = if (open) editingStepId else null,
+                studioActiveFunctionId = if (open) activeFunctionId else it.studioActiveFunctionId,
                 showPinsOverlay = if (open) false else it.showPinsOverlay
             )
         }

@@ -38,9 +38,13 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Colorize
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
@@ -74,6 +78,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -84,6 +89,7 @@ import androidx.compose.ui.unit.sp
 import android.view.KeyEvent
 import com.example.data.TemplateAssetEntity
 import com.example.model.BranchAction
+import com.example.model.CallFunctionStep
 import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
@@ -95,8 +101,11 @@ import com.example.model.KeyPressStep
 import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
+import com.example.model.MacroCloner
 import com.example.model.MacroDefinition
+import com.example.model.MacroFunction
 import com.example.model.MacroStep
+import com.example.model.ScriptClipboardItem
 import com.example.model.SetVariableStep
 import com.example.model.StopStep
 import com.example.model.SwipeStep
@@ -105,6 +114,8 @@ import com.example.model.TapStep
 import com.example.model.TouchGuardPolicy
 import com.example.model.VarComparator
 import com.example.model.VarOperation
+import com.example.ui.components.TemplateCropEditorContent
+import com.example.ui.components.TemplateThumbnailPreview
 import com.example.vision.ScreenDetector
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -355,30 +366,77 @@ fun OverlayStudioWindow(
     macros: List<MacroDefinition>,
     activeMacro: MacroDefinition?,
     initialEditingStepId: String? = null,
+    initialActiveFunctionId: String? = null,
+    clipboardItem: ScriptClipboardItem? = null,
     templates: List<TemplateAssetEntity>,
     screenCaptureActive: Boolean,
     onSelectMacro: (MacroDefinition) -> Unit,
     onCreateMacro: (String) -> Unit,
     onUpdateMacro: (MacroDefinition) -> Unit,
-    onLaunchPicker: (MacroDefinition, MacroStep, PickerMode) -> Unit,
+    onCopyStep: (MacroStep) -> Unit = {},
+    onCopyFunction: (MacroFunction) -> Unit = {},
+    onClearClipboard: () -> Unit = {},
+    onLaunchPicker: (MacroDefinition, MacroStep, PickerMode, String?) -> Unit,
+    onCropTemplate: (
+        templateId: String,
+        trimLeft: Int,
+        trimTop: Int,
+        trimRight: Int,
+        trimBottom: Int,
+        saveAsNew: Boolean,
+        onCropped: (TemplateAssetEntity) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
     onOpenPins: () -> Unit,
     onRequestVision: () -> Unit,
     onRunMacro: (MacroDefinition) -> Unit,
     onClose: () -> Unit
 ) {
-    var editingStep by remember(activeMacro?.id, initialEditingStepId) {
+    var activeFunctionId by remember(activeMacro?.id, initialActiveFunctionId) {
+        mutableStateOf(
+            initialActiveFunctionId?.takeIf { fid ->
+                activeMacro?.functions?.any { it.id == fid } == true
+            }
+        )
+    }
+    val activeFunction = activeMacro?.functions?.find { it.id == activeFunctionId }
+    val currentSteps = activeFunction?.steps ?: activeMacro?.steps.orEmpty()
+
+    var editingStep by remember(activeMacro?.id, initialEditingStepId, initialActiveFunctionId) {
         mutableStateOf(
             if (initialEditingStepId != null) {
-                activeMacro?.steps?.find { it.id == initialEditingStepId }
+                val fnSteps = initialActiveFunctionId?.let { fid ->
+                    activeMacro?.functions?.find { it.id == fid }?.steps
+                }
+                (fnSteps ?: activeMacro?.steps)?.find { it.id == initialEditingStepId }
             } else {
                 null
             }
         )
     }
+    var croppingTemplate by remember { mutableStateOf<TemplateAssetEntity?>(null) }
     var showAddPanel by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var newMacroName by remember { mutableStateOf("") }
     var creatingMacro by remember { mutableStateOf(false) }
+    var creatingFunction by remember { mutableStateOf(false) }
+    var renamingFunction by remember { mutableStateOf(false) }
+    var functionNameInput by remember { mutableStateOf("") }
+
+    fun updateCurrentSteps(transform: (List<MacroStep>) -> List<MacroStep>): MacroDefinition? {
+        val m = activeMacro ?: return null
+        val fid = activeFunctionId
+        val updated = if (fid == null) {
+            m.copy(steps = transform(m.steps))
+        } else {
+            m.copy(
+                functions = m.functions.map { fn ->
+                    if (fn.id == fid) fn.copy(steps = transform(fn.steps)) else fn
+                }
+            )
+        }
+        onUpdateMacro(updated)
+        return updated
+    }
 
     Box(
         modifier = Modifier
@@ -405,14 +463,24 @@ fun OverlayStudioWindow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (editingStep != null || showAddPanel || showSettings || creatingMacro) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (croppingTemplate != null || editingStep != null || showAddPanel || showSettings || creatingMacro || creatingFunction || renamingFunction) {
                             IconButton(
                                 onClick = {
-                                    editingStep = null
-                                    showAddPanel = false
-                                    showSettings = false
-                                    creatingMacro = false
+                                    if (croppingTemplate != null) {
+                                        croppingTemplate = null
+                                    } else {
+                                        editingStep = null
+                                        showAddPanel = false
+                                        showSettings = false
+                                        creatingMacro = false
+                                        creatingFunction = false
+                                        renamingFunction = false
+                                    }
                                 },
                                 modifier = Modifier.size(40.dp)
                             ) {
@@ -422,19 +490,29 @@ fun OverlayStudioWindow(
                         Column {
                             Text(
                                 text = when {
+                                    croppingTemplate != null -> "Precision Template Crop"
                                     editingStep != null -> "Edit Node"
-                                    showAddPanel -> "Add Automation Node"
+                                    showAddPanel -> if (activeFunction != null) "Add to fn ${activeFunction.name}" else "Add Automation Node"
                                     showSettings -> "Macro Settings"
                                     creatingMacro -> "New Macro"
+                                    creatingFunction -> "New Function"
+                                    renamingFunction -> "Rename Function"
                                     else -> "Overlay Studio"
                                 },
                                 color = StudioText,
                                 fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = activeMacro?.name ?: "Select or create a macro",
-                                color = StudioCyan,
+                                text = when {
+                                    croppingTemplate != null -> croppingTemplate?.name.orEmpty()
+                                    activeMacro == null -> "Select or create a macro"
+                                    activeFunction != null -> "${activeMacro.name} • fn ${activeFunction.name}"
+                                    else -> activeMacro.name
+                                },
+                                color = if (activeFunction != null && croppingTemplate == null) StudioViolet else StudioCyan,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
                                 maxLines = 1,
@@ -444,17 +522,17 @@ fun OverlayStudioWindow(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (activeMacro != null && editingStep == null && !showAddPanel) {
+                        if (activeMacro != null && croppingTemplate == null && editingStep == null && !showAddPanel && !creatingFunction && !renamingFunction) {
                             IconButton(onClick = onOpenPins, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Default.MyLocation, contentDescription = "Edit pins on screen", tint = StudioCyan)
                             }
                         }
-                        if (!screenCaptureActive) {
+                        if (!screenCaptureActive && croppingTemplate == null) {
                             IconButton(onClick = onRequestVision, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Default.ScreenshotMonitor, contentDescription = "Enable Vision", tint = StudioAmber)
                             }
                         }
-                        if (activeMacro != null && editingStep == null && !showAddPanel) {
+                        if (activeMacro != null && croppingTemplate == null && editingStep == null && !showAddPanel && !creatingFunction && !renamingFunction) {
                             IconButton(onClick = { onRunMacro(activeMacro); onClose() }, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Default.PlayArrow, contentDescription = "Run", tint = StudioEmerald)
                             }
@@ -480,11 +558,85 @@ fun OverlayStudioWindow(
                                     onCreateMacro(newMacroName.trim().ifBlank { "Overlay Macro" })
                                     newMacroName = ""
                                     creatingMacro = false
+                                    activeFunctionId = null
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = StudioCyan, contentColor = Color(0xFF04131A)),
                                 modifier = Modifier.fillMaxWidth().height(48.dp)
                             ) {
                                 Text("Create Macro", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    creatingFunction && activeMacro != null -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Group steps into a reusable function you can call from Main Flow or other functions.",
+                                color = StudioMuted,
+                                fontSize = 12.sp
+                            )
+                            OverlayTextField("Function Name (e.g. LootRoutine)", functionNameInput, { functionNameInput = it })
+                            Button(
+                                onClick = {
+                                    val desired = functionNameInput.trim().ifBlank { "Function ${activeMacro.functions.size + 1}" }
+                                    val uniqueName = MacroCloner.generateUniqueName(
+                                        desired,
+                                        activeMacro.functions.map { it.name }.toSet()
+                                    )
+                                    val newFn = MacroFunction(name = uniqueName)
+                                    onUpdateMacro(activeMacro.copy(functions = activeMacro.functions + newFn))
+                                    activeFunctionId = newFn.id
+                                    functionNameInput = ""
+                                    creatingFunction = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = StudioViolet, contentColor = Color(0xFF0A0614)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("overlay_create_function_confirm")
+                            ) {
+                                Text("Create Function", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    renamingFunction && activeMacro != null && activeFunction != null -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OverlayTextField("Function Name", functionNameInput, { functionNameInput = it })
+                            Button(
+                                onClick = {
+                                    val newName = functionNameInput.trim().ifBlank { activeFunction.name }
+                                    val fid = activeFunction.id
+                                    fun syncCalls(list: List<MacroStep>): List<MacroStep> = list.map { step ->
+                                        if (step is CallFunctionStep && step.functionId == fid) {
+                                            step.copy(functionName = newName)
+                                        } else step
+                                    }
+                                    val updated = activeMacro.copy(
+                                        steps = syncCalls(activeMacro.steps),
+                                        functions = activeMacro.functions.map { fn ->
+                                            val renamed = if (fn.id == fid) fn.copy(name = newName) else fn
+                                            renamed.copy(steps = syncCalls(renamed.steps))
+                                        }
+                                    )
+                                    onUpdateMacro(updated)
+                                    functionNameInput = ""
+                                    renamingFunction = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = StudioViolet, contentColor = Color(0xFF0A0614)),
+                                modifier = Modifier.fillMaxWidth().height(48.dp)
+                            ) {
+                                Text("Save Name", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -501,9 +653,9 @@ fun OverlayStudioWindow(
 
                     showAddPanel && activeMacro != null -> {
                         OverlayAddStepList(
+                            functions = activeMacro.functions,
                             onAdd = { newSteps ->
-                                val updated = activeMacro.copy(steps = activeMacro.steps + newSteps)
-                                onUpdateMacro(updated)
+                                updateCurrentSteps { it + newSteps }
                                 showAddPanel = false
                                 if (newSteps.size == 1) {
                                     editingStep = newSteps.first()
@@ -512,23 +664,57 @@ fun OverlayStudioWindow(
                         )
                     }
 
+                    croppingTemplate != null && activeMacro != null -> {
+                        val tpl = templates.find { it.id == croppingTemplate?.id } ?: croppingTemplate!!
+                        TemplateCropEditorContent(
+                            template = tpl,
+                            compactMode = true,
+                            onApplyCrop = { l, t, r, b, saveAsNew ->
+                                onCropTemplate(tpl.id, l, t, r, b, saveAsNew) { cropped ->
+                                    val editing = editingStep
+                                    if (editing is IfImageStep) {
+                                        val updatedImg = editing.copy(
+                                            templateId = cropped.id,
+                                            templateName = cropped.name
+                                        )
+                                        updateCurrentSteps { list ->
+                                            list.map { if (it.id == updatedImg.id) updatedImg else it }
+                                        }
+                                        editingStep = updatedImg
+                                    }
+                                    croppingTemplate = null
+                                }
+                            },
+                            onCancel = { croppingTemplate = null }
+                        )
+                    }
+
                     editingStep != null && activeMacro != null -> {
-                        val currentStep = activeMacro.steps.find { it.id == editingStep?.id } ?: editingStep!!
+                        val currentStep = currentSteps.find { it.id == editingStep?.id } ?: editingStep!!
                         OverlayStepEditor(
                             step = currentStep,
-                            allSteps = activeMacro.steps,
+                            allSteps = currentSteps,
+                            functions = activeMacro.functions,
                             templates = templates,
                             screenCaptureActive = screenCaptureActive,
                             onRequestVision = onRequestVision,
                             onLaunchPicker = { updatedStep, mode ->
-                                val nextSteps = activeMacro.steps.map { if (it.id == updatedStep.id) updatedStep else it }
-                                val savedMacro = activeMacro.copy(steps = nextSteps)
-                                onUpdateMacro(savedMacro)
-                                onLaunchPicker(savedMacro, updatedStep, mode)
+                                val savedMacro = updateCurrentSteps { list ->
+                                    list.map { if (it.id == updatedStep.id) updatedStep else it }
+                                } ?: activeMacro
+                                onLaunchPicker(savedMacro, updatedStep, mode, activeFunctionId)
+                            },
+                            onOpenTemplateCrop = { tpl, draftStep ->
+                                updateCurrentSteps { list ->
+                                    list.map { if (it.id == draftStep.id) draftStep else it }
+                                }
+                                editingStep = draftStep
+                                croppingTemplate = tpl
                             },
                             onSave = { updatedStep ->
-                                val nextSteps = activeMacro.steps.map { if (it.id == updatedStep.id) updatedStep else it }
-                                onUpdateMacro(activeMacro.copy(steps = nextSteps))
+                                updateCurrentSteps { list ->
+                                    list.map { if (it.id == updatedStep.id) updatedStep else it }
+                                }
                                 editingStep = null
                             }
                         )
@@ -541,7 +727,7 @@ fun OverlayStudioWindow(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .horizontalScroll(rememberScrollState())
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -553,7 +739,10 @@ fun OverlayStudioWindow(
                                 macros.forEach { m ->
                                     FilterChip(
                                         selected = m.id == activeMacro?.id,
-                                        onClick = { onSelectMacro(m) },
+                                        onClick = {
+                                            activeFunctionId = null
+                                            onSelectMacro(m)
+                                        },
                                         label = { Text(m.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                                     )
                                 }
@@ -564,6 +753,211 @@ fun OverlayStudioWindow(
                                     Text("Tap + New to create a macro.", color = StudioMuted)
                                 }
                             } else {
+                                // Scope / Functions bar
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FilterChip(
+                                        selected = activeFunctionId == null,
+                                        onClick = { activeFunctionId = null },
+                                        label = { Text("Main (${activeMacro.steps.size})", fontSize = 11.sp) },
+                                        modifier = Modifier.testTag("overlay_scope_main")
+                                    )
+                                    activeMacro.functions.forEach { fn ->
+                                        FilterChip(
+                                            selected = activeFunctionId == fn.id,
+                                            onClick = { activeFunctionId = fn.id },
+                                            label = {
+                                                Text(
+                                                    "fn ${fn.name} (${fn.steps.size})",
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        )
+                                    }
+                                    FilterChip(
+                                        selected = false,
+                                        onClick = {
+                                            functionNameInput = ""
+                                            creatingFunction = true
+                                        },
+                                        label = { Text("+ Fn", color = StudioViolet, fontSize = 11.sp) },
+                                        modifier = Modifier.testTag("overlay_add_function_chip")
+                                    )
+                                }
+
+                                // Active Function controls
+                                if (activeFunction != null) {
+                                    Surface(
+                                        color = StudioWell,
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, StudioViolet.copy(alpha = 0.45f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState())
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    functionNameInput = activeFunction.name
+                                                    renamingFunction = true
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier.height(34.dp)
+                                            ) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Rename function", tint = StudioText, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Rename", color = StudioText, fontSize = 11.sp)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { onCopyFunction(activeFunction) },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier
+                                                    .height(34.dp)
+                                                    .testTag("overlay_copy_function_button")
+                                            ) {
+                                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy function", tint = StudioCyan, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Copy Fn", color = StudioCyan, fontSize = 11.sp)
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val callStep = CallFunctionStep(
+                                                        label = "Call ${activeFunction.name}",
+                                                        functionId = activeFunction.id,
+                                                        functionName = activeFunction.name,
+                                                        repeatCount = 1
+                                                    )
+                                                    onUpdateMacro(activeMacro.copy(steps = activeMacro.steps + callStep))
+                                                    activeFunctionId = null
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier.height(34.dp)
+                                            ) {
+                                                Icon(Icons.Default.Code, contentDescription = "Add call to Main", tint = StudioViolet, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Call in Main", color = StudioViolet, fontSize = 11.sp)
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val remaining = activeMacro.functions.filterNot { it.id == activeFunction.id }
+                                                    onUpdateMacro(activeMacro.copy(functions = remaining))
+                                                    activeFunctionId = null
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                modifier = Modifier.height(34.dp)
+                                            ) {
+                                                Icon(Icons.Default.DeleteOutline, contentDescription = "Delete function", tint = StudioRose, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Delete", color = StudioRose, fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Shared Clipboard Bar
+                                if (clipboardItem != null) {
+                                    Surface(
+                                        color = StudioWell,
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, StudioCyan.copy(alpha = 0.45f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState())
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Default.ContentPaste, contentDescription = null, tint = StudioCyan, modifier = Modifier.size(14.dp))
+                                            when (clipboardItem) {
+                                                is ScriptClipboardItem.SingleStep -> {
+                                                    Text(
+                                                        text = clipboardItem.step.label,
+                                                        color = StudioText,
+                                                        fontSize = 11.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1
+                                                    )
+                                                    Button(
+                                                        onClick = {
+                                                            val cloned = MacroCloner.cloneStep(clipboardItem.step)
+                                                            updateCurrentSteps { it + cloned }
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = StudioCyan, contentColor = Color(0xFF04131A)),
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                        modifier = Modifier
+                                                            .height(32.dp)
+                                                            .testTag("overlay_paste_step_button")
+                                                    ) {
+                                                        Text("Paste Here", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                                is ScriptClipboardItem.FunctionClip -> {
+                                                    Text(
+                                                        text = "fn ${clipboardItem.function.name} (${clipboardItem.function.steps.size})",
+                                                        color = StudioText,
+                                                        fontSize = 11.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1
+                                                    )
+                                                    Button(
+                                                        onClick = {
+                                                            val clonedFn = MacroCloner.cloneFunction(
+                                                                clipboardItem.function,
+                                                                activeMacro.functions.map { it.name }.toSet()
+                                                            )
+                                                            onUpdateMacro(activeMacro.copy(functions = activeMacro.functions + clonedFn))
+                                                            activeFunctionId = clonedFn.id
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = StudioViolet, contentColor = Color(0xFF0A0614)),
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                        modifier = Modifier
+                                                            .height(32.dp)
+                                                            .testTag("overlay_paste_as_fn_button")
+                                                    ) {
+                                                        Text("As New Fn", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            val clonedSteps = MacroCloner.cloneStepsWithRemappedIds(clipboardItem.function.steps)
+                                                            updateCurrentSteps { it + clonedSteps }
+                                                        },
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                        modifier = Modifier.height(32.dp)
+                                                    ) {
+                                                        Text("Paste Steps", color = StudioCyan, fontSize = 11.sp)
+                                                    }
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = onClearClipboard,
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(Icons.Default.Close, contentDescription = "Clear clipboard", tint = StudioMuted, modifier = Modifier.size(14.dp))
+                                            }
+                                        }
+                                    }
+                                }
+
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -585,91 +979,157 @@ fun OverlayStudioWindow(
                                     ) {
                                         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
-                                        Text("Add Step", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        Text(
+                                            if (activeFunction != null) "Add to Fn" else "Add Step",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
                                     }
                                 }
 
-                                LazyColumn(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentPadding = PaddingValues(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    itemsIndexed(activeMacro.steps, key = { _, s -> s.id }) { index, step ->
-                                        val accent = stepAccentColor(step)
-                                        Surface(
-                                            color = StudioPanel,
-                                            shape = RoundedCornerShape(12.dp),
-                                            border = BorderStroke(1.dp, StudioBorder),
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { editingStep = step }
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                                verticalAlignment = Alignment.CenterVertically
+                                if (currentSteps.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(24.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (activeFunction != null) {
+                                                "No steps in fn ${activeFunction.name} yet.\nTap Add to Fn or Paste a copied step."
+                                            } else {
+                                                "No steps yet. Tap Add Step to begin."
+                                            },
+                                            color = StudioMuted,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                } else {
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentPadding = PaddingValues(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        itemsIndexed(currentSteps, key = { _, s -> s.id }) { index, step ->
+                                            val accent = stepAccentColor(step)
+                                            Surface(
+                                                color = StudioPanel,
+                                                shape = RoundedCornerShape(12.dp),
+                                                border = BorderStroke(1.dp, StudioBorder),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { editingStep = step }
                                             ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .width(4.dp)
-                                                        .height(40.dp)
-                                                        .background(accent, RoundedCornerShape(2.dp))
-                                                )
-                                                Spacer(Modifier.width(10.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(
-                                                        text = "#${index + 1} ${step.label}",
-                                                        color = if (step.enabled) StudioText else StudioMuted,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = FontWeight.SemiBold,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                    Text(
-                                                        text = stepSummaryText(step),
-                                                        color = StudioMuted,
-                                                        fontSize = 11.sp,
-                                                        fontFamily = FontFamily.Monospace,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        if (index > 0) {
-                                                            val list = activeMacro.steps.toMutableList()
-                                                            val item = list.removeAt(index)
-                                                            list.add(index - 1, item)
-                                                            onUpdateMacro(activeMacro.copy(steps = list))
+                                                Column(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .width(4.dp)
+                                                                .height(34.dp)
+                                                                .background(accent, RoundedCornerShape(2.dp))
+                                                        )
+                                                        Spacer(Modifier.width(10.dp))
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(
+                                                                text = "#${index + 1} ${step.label}",
+                                                                color = if (step.enabled) StudioText else StudioMuted,
+                                                                fontSize = 13.sp,
+                                                                fontWeight = FontWeight.SemiBold,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                text = stepSummaryText(step, activeMacro.functions),
+                                                                color = StudioMuted,
+                                                                fontSize = 11.sp,
+                                                                fontFamily = FontFamily.Monospace,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
                                                         }
-                                                    },
-                                                    enabled = index > 0,
-                                                    modifier = Modifier.size(36.dp)
-                                                ) {
-                                                    Icon(Icons.Default.ArrowUpward, contentDescription = "Move up", tint = StudioMuted, modifier = Modifier.size(16.dp))
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        if (index < activeMacro.steps.lastIndex) {
-                                                            val list = activeMacro.steps.toMutableList()
-                                                            val item = list.removeAt(index)
-                                                            list.add(index + 1, item)
-                                                            onUpdateMacro(activeMacro.copy(steps = list))
+                                                    }
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.End,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        if (step is CallFunctionStep && activeMacro.functions.any { it.id == step.functionId }) {
+                                                            OutlinedButton(
+                                                                onClick = { activeFunctionId = step.functionId },
+                                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                                                modifier = Modifier.height(30.dp)
+                                                            ) {
+                                                                Icon(Icons.Default.Code, contentDescription = "Open function", tint = StudioViolet, modifier = Modifier.size(13.dp))
+                                                                Spacer(Modifier.width(4.dp))
+                                                                Text("Open Fn", color = StudioViolet, fontSize = 10.sp)
+                                                            }
+                                                            Spacer(Modifier.width(4.dp))
                                                         }
-                                                    },
-                                                    enabled = index < activeMacro.steps.lastIndex,
-                                                    modifier = Modifier.size(36.dp)
-                                                ) {
-                                                    Icon(Icons.Default.ArrowDownward, contentDescription = "Move down", tint = StudioMuted, modifier = Modifier.size(16.dp))
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        val list = activeMacro.steps.toMutableList()
-                                                        list.removeAt(index)
-                                                        onUpdateMacro(activeMacro.copy(steps = list))
-                                                    },
-                                                    modifier = Modifier.size(36.dp)
-                                                ) {
-                                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = StudioRose, modifier = Modifier.size(16.dp))
+                                                        IconButton(
+                                                            onClick = { onCopyStep(step) },
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy step", tint = StudioCyan, modifier = Modifier.size(15.dp))
+                                                        }
+                                                        if (clipboardItem is ScriptClipboardItem.SingleStep) {
+                                                            IconButton(
+                                                                onClick = {
+                                                                    val cloned = MacroCloner.cloneStep(clipboardItem.step)
+                                                                    updateCurrentSteps { list ->
+                                                                        list.toMutableList().apply { add(index + 1, cloned) }
+                                                                    }
+                                                                },
+                                                                modifier = Modifier.size(34.dp)
+                                                            ) {
+                                                                Icon(Icons.Default.ContentPaste, contentDescription = "Paste below", tint = StudioEmerald, modifier = Modifier.size(15.dp))
+                                                            }
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
+                                                                if (index > 0) {
+                                                                    updateCurrentSteps { list ->
+                                                                        list.toMutableList().apply {
+                                                                            val item = removeAt(index)
+                                                                            add(index - 1, item)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            enabled = index > 0,
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.ArrowUpward, contentDescription = "Move up", tint = StudioMuted, modifier = Modifier.size(16.dp))
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
+                                                                if (index < currentSteps.lastIndex) {
+                                                                    updateCurrentSteps { list ->
+                                                                        list.toMutableList().apply {
+                                                                            val item = removeAt(index)
+                                                                            add(index + 1, item)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            enabled = index < currentSteps.lastIndex,
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.ArrowDownward, contentDescription = "Move down", tint = StudioMuted, modifier = Modifier.size(16.dp))
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
+                                                                updateCurrentSteps { list ->
+                                                                    list.toMutableList().apply { removeAt(index) }
+                                                                }
+                                                            },
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = StudioRose, modifier = Modifier.size(16.dp))
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -756,6 +1216,7 @@ private fun OverlayMacroSettings(
 
 @Composable
 private fun OverlayAddStepList(
+    functions: List<MacroFunction>,
     onAdd: (List<MacroStep>) -> Unit
 ) {
     Column(
@@ -776,6 +1237,23 @@ private fun OverlayAddStepList(
                         customKeyCode = KeyEvent.KEYCODE_SPACE,
                         keyLabel = "Space",
                         holdMs = 35L
+                    )
+                )
+            )
+        }
+        OverlayAddItem(
+            title = "Call Function",
+            subtitle = if (functions.isEmpty()) "Run a reusable function (create via + Fn)" else "Run one of ${functions.size} saved functions",
+            accent = StudioViolet
+        ) {
+            val firstFn = functions.firstOrNull()
+            onAdd(
+                listOf(
+                    CallFunctionStep(
+                        label = firstFn?.let { "Call ${it.name}" } ?: "Call Function",
+                        functionId = firstFn?.id.orEmpty(),
+                        functionName = firstFn?.name.orEmpty(),
+                        repeatCount = 1
                     )
                 )
             )
@@ -826,10 +1304,12 @@ private fun OverlayAddItem(
 private fun OverlayStepEditor(
     step: MacroStep,
     allSteps: List<MacroStep>,
+    functions: List<MacroFunction>,
     templates: List<TemplateAssetEntity>,
     screenCaptureActive: Boolean,
     onRequestVision: () -> Unit,
     onLaunchPicker: (MacroStep, PickerMode) -> Unit,
+    onOpenTemplateCrop: (TemplateAssetEntity, MacroStep) -> Unit = { _, _ -> },
     onSave: (MacroStep) -> Unit
 ) {
     var label by remember(step) { mutableStateOf(step.label) }
@@ -1223,6 +1703,34 @@ private fun OverlayStepEditor(
                         Text("Search Area", color = StudioEmerald, fontSize = 12.sp)
                     }
                 }
+                val selectedTpl = templates.find { it.id == tplId }
+                if (selectedTpl != null) {
+                    TemplateThumbnailPreview(
+                        template = selectedTpl,
+                        onEditCrop = {
+                            onOpenTemplateCrop(
+                                selectedTpl,
+                                step.copy(
+                                    label = label,
+                                    enabled = enabled,
+                                    templateId = tplId,
+                                    templateName = tplName,
+                                    searchLeft = sLeft,
+                                    searchTop = sTop,
+                                    searchRight = sRight,
+                                    searchBottom = sBottom,
+                                    minConfidencePct = (conf.toIntOrNull() ?: step.minConfidencePct).coerceIn(40, 100),
+                                    tapOnMatch = tapOnMatch,
+                                    thenAction = thenAct,
+                                    thenJumpStepId = thenJump,
+                                    elseAction = elseAct,
+                                    elseJumpStepId = elseJump
+                                )
+                            )
+                        }
+                    )
+                }
+
                 Text(
                     text = if (sRight > sLeft && sBottom > sTop) "ROI: ($sLeft,$sTop)–($sRight,$sBottom)" else "ROI: Full Screen",
                     color = StudioMuted,
@@ -1319,6 +1827,50 @@ private fun OverlayStepEditor(
                     }
                 }
                 OverlaySaveBtn { onSave(step.copy(label = label, enabled = enabled, targetStepId = targetId)) }
+            }
+
+            is CallFunctionStep -> {
+                var selectedFnId by remember(step) { mutableStateOf(step.functionId) }
+                var selectedFnName by remember(step) { mutableStateOf(step.functionName) }
+                var repeatStr by remember(step) { mutableStateOf(step.repeatCount.toString()) }
+
+                Text("Target Function", color = StudioViolet, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                if (functions.isEmpty()) {
+                    Text(
+                        text = "No functions defined in this macro yet. Tap + Fn in the Studio scope bar to create one.",
+                        color = StudioMuted,
+                        fontSize = 11.sp
+                    )
+                } else {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        functions.forEach { fn ->
+                            FilterChip(
+                                selected = selectedFnId == fn.id,
+                                onClick = {
+                                    selectedFnId = fn.id
+                                    selectedFnName = fn.name
+                                    if (label.isBlank() || label == "Call Function" || label.startsWith("Call ")) {
+                                        label = "Call ${fn.name}"
+                                    }
+                                },
+                                label = { Text("fn ${fn.name} (${fn.steps.size})", fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
+                OverlayTextField("Repeat Count", repeatStr, { repeatStr = it.filter(Char::isDigit) }, numeric = true)
+                OverlaySaveBtn {
+                    val resolvedName = functions.find { it.id == selectedFnId }?.name ?: selectedFnName
+                    onSave(
+                        step.copy(
+                            label = label.ifBlank { if (resolvedName.isNotBlank()) "Call $resolvedName" else "Call Function" },
+                            enabled = enabled,
+                            functionId = selectedFnId,
+                            functionName = resolvedName,
+                            repeatCount = (repeatStr.toIntOrNull() ?: step.repeatCount).coerceAtLeast(1)
+                        )
+                    )
+                }
             }
 
             is LoopEndStep -> OverlaySaveBtn { onSave(step.copy(label = label, enabled = enabled)) }
@@ -1420,12 +1972,12 @@ private fun OverlaySaveBtn(onClick: () -> Unit) {
 private fun stepAccentColor(step: MacroStep): Color = when (step) {
     is TapStep, is SwipeStep, is DelayStep, is KeyPressStep -> StudioCyan
     is IfColorStep, is IfImageStep -> StudioEmerald
-    is SetVariableStep -> StudioViolet
+    is SetVariableStep, is CallFunctionStep -> StudioViolet
     is LoopStartStep, is LoopEndStep, is IfVariableStep, is JumpStep -> StudioAmber
     is StopStep -> StudioRose
 }
 
-private fun stepSummaryText(step: MacroStep): String = when (step) {
+private fun stepSummaryText(step: MacroStep, functions: List<MacroFunction> = emptyList()): String = when (step) {
     is TapStep -> "(${step.x.toInt()}, ${step.y.toInt()}) • ${step.holdMs}ms"
     is SwipeStep -> "(${step.startX.toInt()},${step.startY.toInt()})->(${step.endX.toInt()},${step.endY.toInt()})"
     is DelayStep -> "${step.minMs}–${step.maxMs}ms"
@@ -1437,5 +1989,9 @@ private fun stepSummaryText(step: MacroStep): String = when (step) {
     is IfImageStep -> "${step.templateName} >= ${step.minConfidencePct}%"
     is IfVariableStep -> "${step.variableName} ${step.comparator.name} ${step.compareValue}"
     is JumpStep -> "-> ${step.targetStepId.take(6)}"
+    is CallFunctionStep -> {
+        val fnName = functions.find { it.id == step.functionId }?.name ?: step.functionName.ifBlank { "Unassigned" }
+        "fn $fnName() • ${step.repeatCount}x"
+    }
     is StopStep -> "STOP"
 }

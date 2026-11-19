@@ -213,12 +213,31 @@ data class JumpStep(
 ) : MacroStep
 
 @Serializable
+@SerialName("call_fn")
+data class CallFunctionStep(
+    override val id: String = UUID.randomUUID().toString(),
+    override val label: String = "Call Function",
+    override val enabled: Boolean = true,
+    val functionId: String = "",
+    val functionName: String = "",
+    val repeatCount: Int = 1
+) : MacroStep
+
+@Serializable
 @SerialName("stop")
 data class StopStep(
     override val id: String = UUID.randomUUID().toString(),
     override val label: String = "Stop Macro",
     override val enabled: Boolean = true
 ) : MacroStep
+
+@Serializable
+data class MacroFunction(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "Function",
+    val description: String = "",
+    val steps: List<MacroStep> = emptyList()
+)
 
 @Serializable
 data class MacroDefinition(
@@ -231,6 +250,7 @@ data class MacroDefinition(
     val injectionMode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN,
     val touchGuardPolicy: TouchGuardPolicy = TouchGuardPolicy.OFF,
     val steps: List<MacroStep> = emptyList(),
+    val functions: List<MacroFunction> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -251,3 +271,19 @@ data class MacroExportBundle(
     val macros: List<MacroDefinition>,
     val embeddedTemplates: List<EmbeddedTemplate> = emptyList()
 )
+
+fun MacroStep.withEnabled(enabled: Boolean): MacroStep = when (this) {
+    is TapStep -> copy(enabled = enabled)
+    is SwipeStep -> copy(enabled = enabled)
+    is DelayStep -> copy(enabled = enabled)
+    is KeyPressStep -> copy(enabled = enabled)
+    is SetVariableStep -> copy(enabled = enabled)
+    is LoopStartStep -> copy(enabled = enabled)
+    is LoopEndStep -> copy(enabled = enabled)
+    is IfColorStep -> copy(enabled = enabled)
+    is IfImageStep -> copy(enabled = enabled)
+    is IfVariableStep -> copy(enabled = enabled)
+    is JumpStep -> copy(enabled = enabled)
+    is CallFunctionStep -> copy(enabled = enabled)
+    is StopStep -> copy(enabled = enabled)
+}

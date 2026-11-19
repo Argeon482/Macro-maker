@@ -9,6 +9,7 @@ import com.example.model.IfImageStep
 import com.example.model.InputInjectionMode
 import com.example.model.MacroDefinition
 import com.example.model.MacroExportBundle
+import com.example.model.MacroFunction
 import com.example.model.MacroStep
 import com.example.model.TouchGuardPolicy
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +99,83 @@ class MacroRepository(
         BitmapFactory.decodeFile(file.absolutePath)
     }
 
+    suspend fun cropTemplate(
+        templateId: String,
+        trimLeft: Int,
+        trimTop: Int,
+        trimRight: Int,
+        trimBottom: Int,
+        saveAsNew: Boolean = false,
+        newName: String? = null
+    ): TemplateAssetEntity? = withContext(Dispatchers.IO) {
+        val asset = macroDao.getTemplateById(templateId) ?: return@withContext null
+        val sourceFile = File(asset.filePath)
+        if (!sourceFile.exists()) return@withContext null
+        val source = BitmapFactory.decodeFile(sourceFile.absolutePath) ?: return@withContext null
+
+        try {
+            val minW = minOf(4, source.width).coerceAtLeast(1)
+            val minH = minOf(4, source.height).coerceAtLeast(1)
+            val safeLeft = trimLeft.coerceIn(0, (source.width - minW).coerceAtLeast(0))
+            val safeRight = trimRight.coerceIn(0, (source.width - safeLeft - minW).coerceAtLeast(0))
+            val safeTop = trimTop.coerceIn(0, (source.height - minH).coerceAtLeast(0))
+            val safeBottom = trimBottom.coerceIn(0, (source.height - safeTop - minH).coerceAtLeast(0))
+
+            val cropW = (source.width - safeLeft - safeRight).coerceAtLeast(1)
+            val cropH = (source.height - safeTop - safeBottom).coerceAtLeast(1)
+
+            if (!saveAsNew && safeLeft == 0 && safeTop == 0 && safeRight == 0 && safeBottom == 0) {
+                return@withContext asset
+            }
+
+            val cropped = Bitmap.createBitmap(source, safeLeft, safeTop, cropW, cropH)
+            try {
+                if (saveAsNew) {
+                    val newId = UUID.randomUUID().toString()
+                    val outFile = File(templateDir, "$newId.png")
+                    FileOutputStream(outFile).use { out ->
+                        cropped.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    }
+                    val resolvedName = newName?.trim()?.takeIf { it.isNotBlank() } ?: run {
+                        if (asset.name.endsWith(" (Crop)")) asset.name else "${asset.name} (Crop)"
+                    }
+                    val newEntity = TemplateAssetEntity(
+                        id = newId,
+                        name = resolvedName,
+                        filePath = outFile.absolutePath,
+                        width = cropped.width,
+                        height = cropped.height,
+                        createdAt = System.currentTimeMillis()
+                    )
+                    macroDao.upsertTemplate(newEntity)
+                    newEntity
+                } else {
+                    val tempFile = File(templateDir, "${asset.id}.tmp.png")
+                    FileOutputStream(tempFile).use { out ->
+                        cropped.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    }
+                    if (!tempFile.renameTo(sourceFile)) {
+                        tempFile.copyTo(sourceFile, overwrite = true)
+                        tempFile.delete()
+                    }
+                    val updatedEntity = asset.copy(
+                        width = cropped.width,
+                        height = cropped.height,
+                        createdAt = System.currentTimeMillis()
+                    )
+                    macroDao.upsertTemplate(updatedEntity)
+                    updatedEntity
+                }
+            } finally {
+                if (cropped !== source) {
+                    cropped.recycle()
+                }
+            }
+        } finally {
+            source.recycle()
+        }
+    }
+
     suspend fun deleteTemplate(id: String) = withContext(Dispatchers.IO) {
         macroDao.getTemplateById(id)?.let { asset ->
             File(asset.filePath).delete()
@@ -133,7 +211,8 @@ class MacroRepository(
             val selected = if (macroIds.isNullOrEmpty()) all else all.filter { it.id in macroIds }
 
             val neededTemplateIds = selected.flatMap { macro ->
-                macro.steps.filterIsInstance<IfImageStep>().map { it.templateId }
+                val allSteps = macro.steps + macro.functions.flatMap { it.steps }
+                allSteps.filterIsInstance<IfImageStep>().map { it.templateId }
             }.filter { it.isNotBlank() }.toSet()
 
             val embeddedTemplates = macroDao.getAllTemplatesOnce()
@@ -195,16 +274,21 @@ class MacroRepository(
             val now = System.currentTimeMillis()
             var importedCount = 0
             for (macro in bundle.macros) {
-                val remappedSteps = macro.steps.map { step ->
+                fun remapStepTemplates(steps: List<MacroStep>): List<MacroStep> = steps.map { step ->
                     if (step is IfImageStep && step.templateId in templateIdRemap) {
                         step.copy(templateId = templateIdRemap[step.templateId]!!)
                     } else {
                         step
                     }
                 }
+                val remappedSteps = remapStepTemplates(macro.steps)
+                val remappedFunctions = macro.functions.map { fn ->
+                    fn.copy(steps = remapStepTemplates(fn.steps))
+                }
                 val newMacro = macro.copy(
                     id = UUID.randomUUID().toString(),
                     steps = remappedSteps,
+                    functions = remappedFunctions,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -218,6 +302,9 @@ class MacroRepository(
     private fun MacroEntity.toDomain(): MacroDefinition {
         val decodedSteps = runCatching {
             json.decodeFromString<List<MacroStep>>(stepsJson)
+        }.getOrDefault(emptyList())
+        val decodedFunctions = runCatching {
+            json.decodeFromString<List<MacroFunction>>(functionsJson)
         }.getOrDefault(emptyList())
         val resolvedMode = runCatching {
             InputInjectionMode.valueOf(injectionMode)
@@ -235,6 +322,7 @@ class MacroRepository(
             injectionMode = resolvedMode,
             touchGuardPolicy = resolvedGuard,
             steps = decodedSteps,
+            functions = decodedFunctions,
             createdAt = createdAt,
             updatedAt = updatedAt
         )
@@ -251,6 +339,7 @@ class MacroRepository(
             injectionMode = injectionMode.name,
             touchGuardPolicy = touchGuardPolicy.name,
             stepsJson = json.encodeToString(steps),
+            functionsJson = json.encodeToString(functions),
             createdAt = createdAt,
             updatedAt = updatedAt
         )

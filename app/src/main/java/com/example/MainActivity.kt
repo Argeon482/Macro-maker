@@ -138,6 +138,7 @@ private fun ShizuMacroRoot(
     val hasOverlay by viewModel.hasOverlayPermission.collectAsState()
     val captureActive by viewModel.screenCaptureActive.collectAsState()
     val executionState by viewModel.executionState.collectAsState()
+    val clipboardItem by viewModel.clipboardItem.collectAsState()
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -375,8 +376,13 @@ private fun ShizuMacroRoot(
                                 macro = macro,
                                 templates = templates,
                                 executionState = executionState,
+                                clipboardItem = clipboardItem,
                                 onBack = { navController.popBackStack() },
                                 onSaveMacro = { updated -> viewModel.saveMacro(updated) },
+                                onCopyStep = { step -> viewModel.scriptClipboard.copyStep(step) },
+                                onCopyFunction = { fn -> viewModel.scriptClipboard.copyFunction(fn) },
+                                onClearClipboard = { viewModel.scriptClipboard.clear() },
+                                onNotify = { msg -> viewModel.notifyMessage(msg) },
                                 onLaunchDock = { m ->
                                     requestNotificationPermissionIfNeeded()
                                     if (!viewModel.canDrawOverlays()) {
@@ -386,13 +392,16 @@ private fun ShizuMacroRoot(
                                     }
                                 },
                                 onRunNow = { m -> viewModel.runMacroDirectly(m) },
-                                onPickOnScreen = { m, step, mode ->
+                                onPickOnScreen = { m, step, mode, fnId ->
                                     requestNotificationPermissionIfNeeded()
                                     if (!viewModel.canDrawOverlays()) {
                                         openOverlayPermissionSettings()
                                     } else {
-                                        viewModel.startScreenPicker(m, step, mode)
+                                        viewModel.startScreenPicker(m, step, mode, fnId)
                                     }
+                                },
+                                onCropTemplate = { templateId, l, t, r, b, saveAsNew, onCropped ->
+                                    viewModel.cropTemplate(templateId, l, t, r, b, saveAsNew, onCropped)
                                 },
                                 onExportJson = { m -> triggerExport(m) }
                             )

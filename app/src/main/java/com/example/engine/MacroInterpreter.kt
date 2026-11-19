@@ -5,6 +5,7 @@ import android.graphics.Rect
 import com.example.data.LogLevel
 import com.example.data.MacroRepository
 import com.example.model.BranchAction
+import com.example.model.CallFunctionStep
 import com.example.model.DelayStep
 import com.example.model.IfColorStep
 import com.example.model.IfImageStep
@@ -14,6 +15,7 @@ import com.example.model.KeyPressStep
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
+import com.example.model.MacroFunction
 import com.example.model.MacroStep
 import com.example.model.SetVariableStep
 import com.example.model.StopStep
@@ -92,7 +94,8 @@ class MacroInterpreter(
             return
         }
 
-        val requiresTouch = macro.steps.any {
+        val reachableSteps = collectReachableSteps(macro)
+        val requiresTouch = reachableSteps.any {
             it.enabled && (it is TapStep || it is SwipeStep || it is KeyPressStep ||
                 (it is IfColorStep && it.tapOnMatch) || (it is IfImageStep && it.tapOnMatch))
         }
@@ -111,7 +114,7 @@ class MacroInterpreter(
             return
         }
 
-        val requiresVision = macro.steps.any { it.enabled && (it is IfColorStep || it is IfImageStep) }
+        val requiresVision = reachableSteps.any { it.enabled && (it is IfColorStep || it is IfImageStep) }
         if (requiresVision && !screenDetector.isActive.value) {
             val msg = "Screen capture is not active. Grant screen capture before running color or image triggers."
             _state.value = RuntimeExecutionState(
@@ -166,8 +169,37 @@ class MacroInterpreter(
         }
     }
 
+    private fun collectReachableSteps(macro: MacroDefinition): List<MacroStep> {
+        val result = mutableListOf<MacroStep>()
+        val functionsById = macro.functions.associateBy { it.id }
+        val visitedFnIds = mutableSetOf<String>()
+        val queue = ArrayDeque<List<MacroStep>>()
+        queue.addLast(macro.steps)
+        while (queue.isNotEmpty()) {
+            val currentList = queue.removeFirst()
+            for (step in currentList) {
+                result.add(step)
+                if (step.enabled && step is CallFunctionStep) {
+                    val fn = functionsById[step.functionId]
+                        ?: macro.functions.firstOrNull { it.name == step.functionName }
+                    if (fn != null && visitedFnIds.add(fn.id)) {
+                        queue.addLast(fn.steps)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private enum class FrameOutcome {
+        COMPLETED,
+        STOPPED,
+        FAILED
+    }
+
     private suspend fun runMacroLoop(macro: MacroDefinition) {
         val variables = mutableMapOf<String, String>()
+        val functionsById = macro.functions.associateBy { it.id }
         val infiniteMacro = macro.loopCount <= 0
         var macroPass = 0
 
@@ -178,7 +210,13 @@ class MacroInterpreter(
             totalLoops = macro.loopCount,
             lastTelemetry = "Started ${macro.name}"
         )
-        repository.appendLog(macro.id, macro.name, "Engine", "Started macro (${macro.steps.size} steps)", LogLevel.INFO)
+        repository.appendLog(
+            macro.id,
+            macro.name,
+            "Engine",
+            "Started macro (${macro.steps.size} steps, ${macro.functions.size} functions)",
+            LogLevel.INFO
+        )
 
         try {
             while (scope.isActive && (infiniteMacro || macroPass < macro.loopCount)) {
@@ -190,264 +228,17 @@ class MacroInterpreter(
                     )
                 }
 
-                val steps = macro.steps
-                val stepIndexById = steps.withIndex().associate { it.value.id to it.index }
-                val loopStack = ArrayDeque<LoopFrame>()
-                var pc = 0
-                var stopRequested = false
+                val outcome = executeStepList(
+                    macro = macro,
+                    steps = macro.steps,
+                    variables = variables,
+                    functionsById = functionsById,
+                    callDepth = 0,
+                    scopeName = null
+                )
 
-                while (pc in steps.indices && scope.isActive && !stopRequested) {
-                    waitIfPaused()
-
-                    val step = steps[pc]
-                    if (!step.enabled) {
-                        pc++
-                        continue
-                    }
-
-                    _state.update {
-                        it.copy(
-                            currentStepId = step.id,
-                            currentStepLabel = step.label,
-                            variables = variables.toMap()
-                        )
-                    }
-
-                    when (step) {
-                        is TapStep -> {
-                            waitForTouchGuard(macro.touchGuardPolicy)
-                            val ok = shizukuBridge.tap(step.x, step.y, step.holdMs, step.jitterPx, macro.injectionMode)
-                            val msg = if (ok) {
-                                "Tap (${step.x.toInt()}, ${step.y.toInt()}) [${macro.injectionMode.displayLabel}]"
-                            } else {
-                                "Tap failed at (${step.x.toInt()}, ${step.y.toInt()})"
-                            }
-                            updateTelemetry(msg)
-                            if (!ok) {
-                                failExecution(macro, step.label, "Shizuku touch injection failed")
-                                return
-                            }
-                            pc++
-                        }
-
-                        is SwipeStep -> {
-                            waitForTouchGuard(macro.touchGuardPolicy)
-                            val ok = shizukuBridge.swipe(
-                                step.startX,
-                                step.startY,
-                                step.endX,
-                                step.endY,
-                                step.durationMs,
-                                step.interpolateSteps,
-                                macro.injectionMode
-                            )
-                            val msg = "Swipe (${step.startX.toInt()},${step.startY.toInt()}) -> (${step.endX.toInt()},${step.endY.toInt()}) [${macro.injectionMode.displayLabel}]"
-                            updateTelemetry(msg)
-                            if (!ok) {
-                                failExecution(macro, step.label, "Shizuku swipe injection failed")
-                                return
-                            }
-                            pc++
-                        }
-
-                        is DelayStep -> {
-                            val min = step.minMs.coerceAtLeast(0L)
-                            val max = step.maxMs.coerceAtLeast(min)
-                            val waitMs = if (max > min) Random.nextLong(min, max + 1) else min
-                            updateTelemetry("Wait ${waitMs}ms")
-                            delay(waitMs)
-                            pc++
-                        }
-
-                        is KeyPressStep -> {
-                            val code = step.resolvedKeyCode()
-                            val binding = step.formattedBinding()
-                            val ok = shizukuBridge.pressKey(code, step.holdMs, step.metaState)
-                            updateTelemetry("Key $binding (${step.holdMs}ms)")
-                            if (!ok) {
-                                failExecution(macro, step.label, "Key injection failed ($binding)")
-                                return
-                            }
-                            pc++
-                        }
-
-                        is SetVariableStep -> {
-                            val newValue = evaluateSetVar(variables[step.variableName], step.operation, step.valueExpression)
-                            variables[step.variableName] = newValue
-                            _state.update { it.copy(variables = variables.toMap()) }
-                            updateTelemetry("${step.variableName} = $newValue")
-                            pc++
-                        }
-
-                        is LoopStartStep -> {
-                            val conditionSatisfied = if (step.conditionVar.isBlank()) {
-                                true
-                            } else {
-                                compareValues(
-                                    variables[step.conditionVar] ?: "0",
-                                    step.conditionOp,
-                                    step.conditionValue
-                                )
-                            }
-                            if (!conditionSatisfied) {
-                                pc = findMatchingLoopEnd(steps, pc, step.id) + 1
-                            } else {
-                                loopStack.addLast(
-                                    LoopFrame(
-                                        startIndex = pc,
-                                        startStepId = step.id,
-                                        remainingIterations = step.iterations.coerceAtLeast(0),
-                                        infiniteUntilConditionFalse = step.iterations <= 0 && step.conditionVar.isNotBlank()
-                                    )
-                                )
-                                pc++
-                            }
-                        }
-
-                        is LoopEndStep -> {
-                            val top = loopStack.lastOrNull()
-                            if (top == null) {
-                                pc++
-                            } else {
-                                val startStep = steps[top.startIndex] as? LoopStartStep
-                                val conditionStillTrue = if (startStep != null && startStep.conditionVar.isNotBlank()) {
-                                    compareValues(
-                                        variables[startStep.conditionVar] ?: "0",
-                                        startStep.conditionOp,
-                                        startStep.conditionValue
-                                    )
-                                } else {
-                                    true
-                                }
-
-                                val shouldContinue = if (top.infiniteUntilConditionFalse) {
-                                    conditionStillTrue
-                                } else {
-                                    top.remainingIterations -= 1
-                                    top.remainingIterations > 0 && conditionStillTrue
-                                }
-
-                                if (shouldContinue) {
-                                    updateTelemetry("Loop repeat (${top.remainingIterations} left)")
-                                    pc = top.startIndex + 1
-                                } else {
-                                    loopStack.removeLast()
-                                    pc++
-                                }
-                            }
-                        }
-
-                        is IfColorStep -> {
-                            val frame = captureWithRetry(macro.pollingIntervalMs)
-                            if (frame == null) {
-                                updateTelemetry("No screen frame yet")
-                                pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                    stopRequested = true
-                                }
-                            } else {
-                                val result = screenDetector.matchColor(
-                                    frame,
-                                    step.x,
-                                    step.y,
-                                    step.targetHexColor,
-                                    step.tolerancePct
-                                )
-                                frame.recycle()
-                                updateTelemetry("Color ${result.sampledHex} (${result.similarityPct}%)")
-                                if (result.matched) {
-                                    repository.appendLog(
-                                        macro.id,
-                                        macro.name,
-                                        step.label,
-                                        "Matched ${step.targetHexColor} at (${step.x},${step.y}) [${result.similarityPct}%]",
-                                        LogLevel.SUCCESS
-                                    )
-                                    if (step.tapOnMatch) {
-                                        waitForTouchGuard(macro.touchGuardPolicy)
-                                        shizukuBridge.tap(step.x.toFloat(), step.y.toFloat(), mode = macro.injectionMode)
-                                    }
-                                    pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                        stopRequested = true
-                                    }
-                                } else {
-                                    pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                        stopRequested = true
-                                    }
-                                }
-                            }
-                        }
-
-                        is IfImageStep -> {
-                            val tpl = repository.loadTemplateBitmap(step.templateId)
-                            val frame = captureWithRetry(macro.pollingIntervalMs)
-                            if (tpl == null || frame == null) {
-                                tpl?.recycle()
-                                frame?.recycle()
-                                updateTelemetry(if (tpl == null) "Missing template asset" else "No screen frame")
-                                pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                    stopRequested = true
-                                }
-                            } else {
-                                val roi = if (step.searchRight > step.searchLeft && step.searchBottom > step.searchTop) {
-                                    Rect(step.searchLeft, step.searchTop, step.searchRight, step.searchBottom)
-                                } else null
-                                val result = screenDetector.matchTemplate(frame, tpl, roi, step.minConfidencePct)
-                                tpl.recycle()
-                                frame.recycle()
-                                updateTelemetry("Image ${step.templateName}: ${result.confidencePct}%")
-                                if (result.matched) {
-                                    repository.appendLog(
-                                        macro.id,
-                                        macro.name,
-                                        step.label,
-                                        "Matched '${step.templateName}' at (${result.centerX},${result.centerY}) [${result.confidencePct}%]",
-                                        LogLevel.SUCCESS
-                                    )
-                                    if (step.tapOnMatch) {
-                                        waitForTouchGuard(macro.touchGuardPolicy)
-                                        shizukuBridge.tap(result.centerX.toFloat(), result.centerY.toFloat(), mode = macro.injectionMode)
-                                    }
-                                    pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                        stopRequested = true
-                                    }
-                                } else {
-                                    pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                        stopRequested = true
-                                    }
-                                }
-                            }
-                        }
-
-                        is IfVariableStep -> {
-                            val currentVal = variables[step.variableName] ?: "0"
-                            val matched = compareValues(currentVal, step.comparator, step.compareValue)
-                            updateTelemetry("If ${step.variableName}($currentVal) -> $matched")
-                            pc = if (matched) {
-                                resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                    stopRequested = true
-                                }
-                            } else {
-                                resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
-                                    stopRequested = true
-                                }
-                            }
-                        }
-
-                        is JumpStep -> {
-                            val targetIdx = stepIndexById[step.targetStepId]
-                            pc = if (targetIdx != null) targetIdx else pc + 1
-                        }
-
-                        is StopStep -> {
-                            stopRequested = true
-                        }
-                    }
-
-                    // Yield briefly between steps so cancellations and tight loops stay responsive
-                    delay(12L)
-                }
-
-                if (stopRequested) break
+                if (outcome == FrameOutcome.FAILED) return
+                if (outcome == FrameOutcome.STOPPED) break
                 if (infiniteMacro || macroPass < macro.loopCount) {
                     delay(macro.pollingIntervalMs.coerceAtLeast(40L))
                 }
@@ -469,6 +260,322 @@ class MacroInterpreter(
         } finally {
             shizukuBridge.releaseActiveTouch()
         }
+    }
+
+    private suspend fun executeStepList(
+        macro: MacroDefinition,
+        steps: List<MacroStep>,
+        variables: MutableMap<String, String>,
+        functionsById: Map<String, MacroFunction>,
+        callDepth: Int,
+        scopeName: String?
+    ): FrameOutcome {
+        val stepIndexById = steps.withIndex().associate { it.value.id to it.index }
+        val loopStack = ArrayDeque<LoopFrame>()
+        var pc = 0
+        var stopRequested = false
+
+        while (pc in steps.indices && scope.isActive && !stopRequested) {
+            waitIfPaused()
+
+            val step = steps[pc]
+            if (!step.enabled) {
+                pc++
+                continue
+            }
+
+            val displayLabel = if (scopeName != null) "[$scopeName] ${step.label}" else step.label
+            _state.update {
+                it.copy(
+                    currentStepId = step.id,
+                    currentStepLabel = displayLabel,
+                    variables = variables.toMap()
+                )
+            }
+
+            when (step) {
+                is TapStep -> {
+                    waitForTouchGuard(macro.touchGuardPolicy)
+                    val ok = shizukuBridge.tap(step.x, step.y, step.holdMs, step.jitterPx, macro.injectionMode)
+                    val msg = if (ok) {
+                        "Tap (${step.x.toInt()}, ${step.y.toInt()}) [${macro.injectionMode.displayLabel}]"
+                    } else {
+                        "Tap failed at (${step.x.toInt()}, ${step.y.toInt()})"
+                    }
+                    updateTelemetry(msg)
+                    if (!ok) {
+                        failExecution(macro, displayLabel, "Shizuku touch injection failed")
+                        return FrameOutcome.FAILED
+                    }
+                    pc++
+                }
+
+                is SwipeStep -> {
+                    waitForTouchGuard(macro.touchGuardPolicy)
+                    val ok = shizukuBridge.swipe(
+                        step.startX,
+                        step.startY,
+                        step.endX,
+                        step.endY,
+                        step.durationMs,
+                        step.interpolateSteps,
+                        macro.injectionMode
+                    )
+                    val msg = "Swipe (${step.startX.toInt()},${step.startY.toInt()}) -> (${step.endX.toInt()},${step.endY.toInt()}) [${macro.injectionMode.displayLabel}]"
+                    updateTelemetry(msg)
+                    if (!ok) {
+                        failExecution(macro, displayLabel, "Shizuku swipe injection failed")
+                        return FrameOutcome.FAILED
+                    }
+                    pc++
+                }
+
+                is DelayStep -> {
+                    val min = step.minMs.coerceAtLeast(0L)
+                    val max = step.maxMs.coerceAtLeast(min)
+                    val waitMs = if (max > min) Random.nextLong(min, max + 1) else min
+                    updateTelemetry("Wait ${waitMs}ms")
+                    delay(waitMs)
+                    pc++
+                }
+
+                is KeyPressStep -> {
+                    val code = step.resolvedKeyCode()
+                    val binding = step.formattedBinding()
+                    val ok = shizukuBridge.pressKey(code, step.holdMs, step.metaState)
+                    updateTelemetry("Key $binding (${step.holdMs}ms)")
+                    if (!ok) {
+                        failExecution(macro, displayLabel, "Key injection failed ($binding)")
+                        return FrameOutcome.FAILED
+                    }
+                    pc++
+                }
+
+                is SetVariableStep -> {
+                    val newValue = evaluateSetVar(variables[step.variableName], step.operation, step.valueExpression)
+                    variables[step.variableName] = newValue
+                    _state.update { it.copy(variables = variables.toMap()) }
+                    updateTelemetry("${step.variableName} = $newValue")
+                    pc++
+                }
+
+                is LoopStartStep -> {
+                    val conditionSatisfied = if (step.conditionVar.isBlank()) {
+                        true
+                    } else {
+                        compareValues(
+                            variables[step.conditionVar] ?: "0",
+                            step.conditionOp,
+                            step.conditionValue
+                        )
+                    }
+                    if (!conditionSatisfied) {
+                        pc = findMatchingLoopEnd(steps, pc, step.id) + 1
+                    } else {
+                        loopStack.addLast(
+                            LoopFrame(
+                                startIndex = pc,
+                                startStepId = step.id,
+                                remainingIterations = step.iterations.coerceAtLeast(0),
+                                infiniteUntilConditionFalse = step.iterations <= 0 && step.conditionVar.isNotBlank()
+                            )
+                        )
+                        pc++
+                    }
+                }
+
+                is LoopEndStep -> {
+                    val top = loopStack.lastOrNull()
+                    if (top == null) {
+                        pc++
+                    } else {
+                        val startStep = steps[top.startIndex] as? LoopStartStep
+                        val conditionStillTrue = if (startStep != null && startStep.conditionVar.isNotBlank()) {
+                            compareValues(
+                                variables[startStep.conditionVar] ?: "0",
+                                startStep.conditionOp,
+                                startStep.conditionValue
+                            )
+                        } else {
+                            true
+                        }
+
+                        val shouldContinue = if (top.infiniteUntilConditionFalse) {
+                            conditionStillTrue
+                        } else {
+                            top.remainingIterations -= 1
+                            top.remainingIterations > 0 && conditionStillTrue
+                        }
+
+                        if (shouldContinue) {
+                            updateTelemetry("Loop repeat (${top.remainingIterations} left)")
+                            pc = top.startIndex + 1
+                        } else {
+                            loopStack.removeLast()
+                            pc++
+                        }
+                    }
+                }
+
+                is IfColorStep -> {
+                    val frame = captureWithRetry(macro.pollingIntervalMs)
+                    if (frame == null) {
+                        updateTelemetry("No screen frame yet")
+                        pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
+                            stopRequested = true
+                        }
+                    } else {
+                        val result = screenDetector.matchColor(
+                            frame,
+                            step.x,
+                            step.y,
+                            step.targetHexColor,
+                            step.tolerancePct
+                        )
+                        frame.recycle()
+                        updateTelemetry("Color ${result.sampledHex} (${result.similarityPct}%)")
+                        if (result.matched) {
+                            repository.appendLog(
+                                macro.id,
+                                macro.name,
+                                displayLabel,
+                                "Matched ${step.targetHexColor} at (${step.x},${step.y}) [${result.similarityPct}%]",
+                                LogLevel.SUCCESS
+                            )
+                            if (step.tapOnMatch) {
+                                waitForTouchGuard(macro.touchGuardPolicy)
+                                shizukuBridge.tap(step.x.toFloat(), step.y.toFloat(), mode = macro.injectionMode)
+                            }
+                            pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
+                                stopRequested = true
+                            }
+                        } else {
+                            pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
+                                stopRequested = true
+                            }
+                        }
+                    }
+                }
+
+                is IfImageStep -> {
+                    val tpl = repository.loadTemplateBitmap(step.templateId)
+                    val frame = captureWithRetry(macro.pollingIntervalMs)
+                    if (tpl == null || frame == null) {
+                        tpl?.recycle()
+                        frame?.recycle()
+                        updateTelemetry(if (tpl == null) "Missing template asset" else "No screen frame")
+                        pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
+                            stopRequested = true
+                        }
+                    } else {
+                        val roi = if (step.searchRight > step.searchLeft && step.searchBottom > step.searchTop) {
+                            Rect(step.searchLeft, step.searchTop, step.searchRight, step.searchBottom)
+                        } else null
+                        val result = screenDetector.matchTemplate(frame, tpl, roi, step.minConfidencePct)
+                        tpl.recycle()
+                        frame.recycle()
+                        updateTelemetry("Image ${step.templateName}: ${result.confidencePct}%")
+                        if (result.matched) {
+                            repository.appendLog(
+                                macro.id,
+                                macro.name,
+                                displayLabel,
+                                "Matched '${step.templateName}' at (${result.centerX},${result.centerY}) [${result.confidencePct}%]",
+                                LogLevel.SUCCESS
+                            )
+                            if (step.tapOnMatch) {
+                                waitForTouchGuard(macro.touchGuardPolicy)
+                                shizukuBridge.tap(result.centerX.toFloat(), result.centerY.toFloat(), mode = macro.injectionMode)
+                            }
+                            pc = resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
+                                stopRequested = true
+                            }
+                        } else {
+                            pc = resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
+                                stopRequested = true
+                            }
+                        }
+                    }
+                }
+
+                is IfVariableStep -> {
+                    val currentVal = variables[step.variableName] ?: "0"
+                    val matched = compareValues(currentVal, step.comparator, step.compareValue)
+                    updateTelemetry("If ${step.variableName}($currentVal) -> $matched")
+                    pc = if (matched) {
+                        resolveBranchPc(step.thenAction, step.thenJumpStepId, pc, steps, stepIndexById, loopStack) {
+                            stopRequested = true
+                        }
+                    } else {
+                        resolveBranchPc(step.elseAction, step.elseJumpStepId, pc, steps, stepIndexById, loopStack) {
+                            stopRequested = true
+                        }
+                    }
+                }
+
+                is JumpStep -> {
+                    val targetIdx = stepIndexById[step.targetStepId]
+                    pc = if (targetIdx != null) targetIdx else pc + 1
+                }
+
+                is CallFunctionStep -> {
+                    val targetFn = functionsById[step.functionId]
+                        ?: macro.functions.firstOrNull { it.name == step.functionName }
+                    if (targetFn == null) {
+                        updateTelemetry("Missing function '${step.functionName.ifBlank { step.functionId.take(6) }}'")
+                        repository.appendLog(
+                            macro.id,
+                            macro.name,
+                            displayLabel,
+                            "Skipped missing function '${step.functionName}'",
+                            LogLevel.WARN
+                        )
+                        pc++
+                    } else if (callDepth >= MAX_CALL_DEPTH) {
+                        failExecution(
+                            macro,
+                            displayLabel,
+                            "Max function call depth ($MAX_CALL_DEPTH) exceeded in '${targetFn.name}'"
+                        )
+                        return FrameOutcome.FAILED
+                    } else {
+                        val repeats = step.repeatCount.coerceAtLeast(1)
+                        var fnOutcome = FrameOutcome.COMPLETED
+                        for (rep in 1..repeats) {
+                            if (!scope.isActive) break
+                            updateTelemetry(
+                                if (repeats > 1) "Call fn ${targetFn.name} ($rep/$repeats)" else "Call fn ${targetFn.name}"
+                            )
+                            fnOutcome = executeStepList(
+                                macro = macro,
+                                steps = targetFn.steps,
+                                variables = variables,
+                                functionsById = functionsById,
+                                callDepth = callDepth + 1,
+                                scopeName = targetFn.name
+                            )
+                            if (fnOutcome != FrameOutcome.COMPLETED) break
+                        }
+                        when (fnOutcome) {
+                            FrameOutcome.FAILED -> return FrameOutcome.FAILED
+                            FrameOutcome.STOPPED -> {
+                                stopRequested = true
+                            }
+                            FrameOutcome.COMPLETED -> pc++
+                        }
+                    }
+                }
+
+                is StopStep -> {
+                    stopRequested = true
+                }
+            }
+
+            // Yield briefly between steps so cancellations and tight loops stay responsive
+            delay(12L)
+        }
+
+        return if (stopRequested) FrameOutcome.STOPPED else FrameOutcome.COMPLETED
     }
 
     private suspend fun captureWithRetry(pollingMs: Long): Bitmap? {
@@ -507,6 +614,8 @@ class MacroInterpreter(
     }
 
     companion object {
+        const val MAX_CALL_DEPTH = 16
+
         internal fun shouldYieldForTouchGuard(
             policy: TouchGuardPolicy,
             liveTouch: LiveTouchSnapshot,
