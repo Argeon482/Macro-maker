@@ -171,27 +171,19 @@ class InputInjectorUserService : IInputInjectorService.Stub() {
         } ?: return false
         val method = injectInputEventMethod ?: return false
         return try {
-            if (event is MotionEvent) {
-                if (event.source == InputDevice.SOURCE_UNKNOWN) {
-                    event.source = InputDevice.SOURCE_TOUCHSCREEN
-                }
-                val masked = event.actionMasked
-                if ((masked == MotionEvent.ACTION_BUTTON_PRESS || masked == MotionEvent.ACTION_BUTTON_RELEASE) &&
-                    event.actionButton == 0
-                ) {
-                    runCatching {
-                        val setBtn = MotionEvent::class.java.getDeclaredMethod("setActionButton", Int::class.javaPrimitiveType)
-                        setBtn.isAccessible = true
-                        setBtn.invoke(event, MotionEvent.BUTTON_PRIMARY)
-                    }
-                }
+            if (event is MotionEvent && event.source == InputDevice.SOURCE_UNKNOWN) {
+                event.source = InputDevice.SOURCE_TOUCHSCREEN
+            } else if (event is android.view.KeyEvent && event.source == InputDevice.SOURCE_UNKNOWN) {
+                event.source = InputDevice.SOURCE_KEYBOARD
             }
             val ok = (method.invoke(im, event, mode) as? Boolean) ?: false
             val uid = android.os.Process.myUid()
-            lastInjectDiagnostic = if (event is MotionEvent) {
-                "ok=$ok uid=$uid act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
-            } else {
-                "ok=$ok uid=$uid key"
+            lastInjectDiagnostic = when (event) {
+                is MotionEvent ->
+                    "ok=$ok uid=$uid act=${MotionEvent.actionToString(event.action)} dev=${event.deviceId} ptrs=${event.pointerCount} src=0x${Integer.toHexString(event.source)}"
+                is android.view.KeyEvent ->
+                    "ok=$ok uid=$uid key=${android.view.KeyEvent.keyCodeToString(event.keyCode)} act=${if (event.action == android.view.KeyEvent.ACTION_DOWN) "DOWN" else "UP"} src=0x${Integer.toHexString(event.source)}"
+                else -> "ok=$ok uid=$uid event"
             }
             ok
         } catch (t: Throwable) {

@@ -260,10 +260,12 @@ class MacroInterpreter(
                         }
 
                         is KeyPressStep -> {
-                            val ok = shizukuBridge.pressKey(step.keyAction.keyCode)
-                            updateTelemetry("Key ${step.keyAction.displayLabel}")
+                            val code = step.resolvedKeyCode()
+                            val binding = step.formattedBinding()
+                            val ok = shizukuBridge.pressKey(code, step.holdMs, step.metaState)
+                            updateTelemetry("Key $binding (${step.holdMs}ms)")
                             if (!ok) {
-                                failExecution(macro, step.label, "Key injection failed")
+                                failExecution(macro, step.label, "Key injection failed ($binding)")
                                 return
                             }
                             pc++

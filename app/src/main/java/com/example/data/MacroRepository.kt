@@ -221,7 +221,7 @@ class MacroRepository(
         }.getOrDefault(emptyList())
         val resolvedMode = runCatching {
             InputInjectionMode.valueOf(injectionMode)
-        }.getOrDefault(InputInjectionMode.MOUSE)
+        }.getOrDefault(InputInjectionMode.TOUCHSCREEN)
         val resolvedGuard = runCatching {
             TouchGuardPolicy.valueOf(touchGuardPolicy)
         }.getOrDefault(TouchGuardPolicy.OFF)

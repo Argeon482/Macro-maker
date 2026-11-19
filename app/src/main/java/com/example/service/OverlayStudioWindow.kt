@@ -81,6 +81,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.view.KeyEvent
 import com.example.data.TemplateAssetEntity
 import com.example.model.BranchAction
 import com.example.model.DelayStep
@@ -89,7 +90,9 @@ import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
 import com.example.model.InputInjectionMode
 import com.example.model.JumpStep
+import com.example.model.KeyCategory
 import com.example.model.KeyPressStep
+import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
@@ -765,7 +768,18 @@ private fun OverlayAddStepList(
         OverlayAddItem("Tap Coordinate", "Inject tap at (x, y)", StudioCyan) { onAdd(listOf(TapStep())) }
         OverlayAddItem("Swipe Gesture", "Drag from Start to End", StudioCyan) { onAdd(listOf(SwipeStep())) }
         OverlayAddItem("Wait / Delay", "Pause between actions (ms)", StudioCyan) { onAdd(listOf(DelayStep())) }
-        OverlayAddItem("System Key", "Back, Home, or Recents", StudioCyan) { onAdd(listOf(KeyPressStep())) }
+        OverlayAddItem("Key Press (Keyboard / Game)", "Send any keyboard, game, or system key", StudioCyan) {
+            onAdd(
+                listOf(
+                    KeyPressStep(
+                        label = "Key Space",
+                        customKeyCode = KeyEvent.KEYCODE_SPACE,
+                        keyLabel = "Space",
+                        holdMs = 35L
+                    )
+                )
+            )
+        }
         OverlayAddItem("If Pixel Color", "Sample & match RGB at (x, y)", StudioEmerald) { onAdd(listOf(IfColorStep())) }
         OverlayAddItem("If Image Match", "Crop template & search region", StudioEmerald) { onAdd(listOf(IfImageStep())) }
         OverlayAddItem("Loop Block (Start + End)", "Repeat N times or while true", StudioAmber) {
@@ -951,13 +965,92 @@ private fun OverlayStepEditor(
             }
 
             is KeyPressStep -> {
-                var keyAction by remember(step) { mutableStateOf(step.keyAction) }
+                var selectedCategory by remember(step) {
+                    val code = step.resolvedKeyCode()
+                    val matched = KeyboardKeyCatalog.allOptions.firstOrNull { it.keyCode == code }?.category
+                        ?: KeyCategory.GAME_ACTION
+                    mutableStateOf(matched)
+                }
+                var keyCode by remember(step) { mutableStateOf(step.resolvedKeyCode()) }
+                var keyCodeText by remember(step) { mutableStateOf(step.resolvedKeyCode().toString()) }
+                var keyLabel by remember(step) { mutableStateOf(step.resolvedKeyLabel()) }
+                var holdStr by remember(step) { mutableStateOf(step.holdMs.toString()) }
+                var useShift by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_SHIFT_ON) != 0) }
+                var useCtrl by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_CTRL_ON) != 0) }
+                var useAlt by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_ALT_ON) != 0) }
+
+                Text("Category", color = StudioCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SystemKeyAction.entries.forEach { a ->
-                        FilterChip(selected = keyAction == a, onClick = { keyAction = a }, label = { Text(a.displayLabel) })
+                    KeyCategory.entries.forEach { cat ->
+                        FilterChip(
+                            selected = selectedCategory == cat,
+                            onClick = { selectedCategory = cat },
+                            label = { Text(cat.title, fontSize = 11.sp) }
+                        )
                     }
                 }
-                OverlaySaveBtn { onSave(step.copy(label = label, enabled = enabled, keyAction = keyAction)) }
+
+                Text("Key Binding: $keyLabel (code=$keyCode)", color = StudioText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    KeyboardKeyCatalog.optionsForCategory(selectedCategory).forEach { opt ->
+                        FilterChip(
+                            selected = keyCode == opt.keyCode,
+                            onClick = {
+                                keyCode = opt.keyCode
+                                keyCodeText = opt.keyCode.toString()
+                                keyLabel = opt.label
+                                if (label.startsWith("Key ") || label == "Key Press" || label == "System Key") {
+                                    label = "Key ${opt.label}"
+                                }
+                            },
+                            label = { Text(opt.label, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Text("Modifiers (Optional)", color = StudioMuted, fontSize = 11.sp)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = useShift, onClick = { useShift = !useShift }, label = { Text("Shift", fontSize = 11.sp) })
+                    FilterChip(selected = useCtrl, onClick = { useCtrl = !useCtrl }, label = { Text("Ctrl", fontSize = 11.sp) })
+                    FilterChip(selected = useAlt, onClick = { useAlt = !useAlt }, label = { Text("Alt", fontSize = 11.sp) })
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OverlayTextField("Hold ms", holdStr, { holdStr = it.filter(Char::isDigit) }, Modifier.weight(1f), numeric = true)
+                    OverlayTextField(
+                        "KeyCode",
+                        keyCodeText,
+                        { raw ->
+                            val clean = raw.filter(Char::isDigit)
+                            keyCodeText = clean
+                            clean.toIntOrNull()?.let { parsed ->
+                                keyCode = parsed
+                                keyLabel = KeyboardKeyCatalog.labelForKeyCode(parsed)
+                            }
+                        },
+                        Modifier.weight(1f),
+                        numeric = true
+                    )
+                }
+
+                OverlaySaveBtn {
+                    val meta = (if (useShift) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0) or
+                        (if (useCtrl) KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON else 0) or
+                        (if (useAlt) KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON else 0)
+                    val matchedSys = SystemKeyAction.entries.firstOrNull { it.keyCode == keyCode } ?: step.keyAction
+                    val resolvedLabel = keyLabel.ifBlank { KeyboardKeyCatalog.labelForKeyCode(keyCode) }
+                    onSave(
+                        step.copy(
+                            label = label.ifBlank { "Key $resolvedLabel" },
+                            enabled = enabled,
+                            keyAction = matchedSys,
+                            customKeyCode = keyCode,
+                            keyLabel = resolvedLabel,
+                            holdMs = (holdStr.toLongOrNull() ?: step.holdMs).coerceIn(10L, 5000L),
+                            metaState = meta
+                        )
+                    )
+                }
             }
 
             is SetVariableStep -> {
@@ -1336,7 +1429,7 @@ private fun stepSummaryText(step: MacroStep): String = when (step) {
     is TapStep -> "(${step.x.toInt()}, ${step.y.toInt()}) • ${step.holdMs}ms"
     is SwipeStep -> "(${step.startX.toInt()},${step.startY.toInt()})->(${step.endX.toInt()},${step.endY.toInt()})"
     is DelayStep -> "${step.minMs}–${step.maxMs}ms"
-    is KeyPressStep -> step.keyAction.displayLabel
+    is KeyPressStep -> "KEY_${step.formattedBinding().uppercase()} • ${step.holdMs}ms"
     is SetVariableStep -> "${step.variableName} ${step.operation.name} ${step.valueExpression}"
     is LoopStartStep -> if (step.iterations <= 0) "WHILE ${step.conditionVar}" else "REPEAT ${step.iterations}x"
     is LoopEndStep -> "END LOOP"

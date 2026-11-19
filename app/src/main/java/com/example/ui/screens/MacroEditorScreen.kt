@@ -344,7 +344,7 @@ private fun StepNodeCard(
             is TapStep -> "(${step.x.toInt()}, ${step.y.toInt()}) • hold ${step.holdMs}ms • ±${step.jitterPx}px"
             is SwipeStep -> "(${step.startX.toInt()},${step.startY.toInt()}) -> (${step.endX.toInt()},${step.endY.toInt()}) • ${step.durationMs}ms"
             is DelayStep -> if (step.minMs == step.maxMs) "${step.minMs} ms" else "${step.minMs}–${step.maxMs} ms"
-            is KeyPressStep -> "KEY_${step.keyAction.displayLabel.uppercase()}"
+            is KeyPressStep -> "KEY_${step.formattedBinding().uppercase()} • ${step.holdMs}ms"
             is SetVariableStep -> "${step.variableName} ${step.operation.name.lowercase()} ${step.valueExpression}"
             is LoopStartStep -> if (step.iterations <= 0) "WHILE ${step.conditionVar} ${step.conditionOp.name} ${step.conditionValue}" else "REPEAT ${step.iterations}x"
             is LoopEndStep -> "END LOOP BLOCK"

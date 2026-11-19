@@ -9,12 +9,14 @@ import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.view.InputDevice
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.WindowManager
 import com.example.BuildConfig
 import com.example.model.InputInjectionMode
+import com.example.model.KeyboardKeyCatalog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -96,7 +98,7 @@ class ShizukuInputBridge(private val context: Context) {
     private var activeLastY: Float = 0f
 
     @Volatile
-    private var activeInjectionMode: InputInjectionMode = InputInjectionMode.MOUSE
+    private var activeInjectionMode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN
 
     @Volatile
     private var activeDeviceId: Int = 0
@@ -108,7 +110,7 @@ class ShizukuInputBridge(private val context: Context) {
             .daemon(false)
             .processNameSuffix("shizuku_injector")
             .debuggable(BuildConfig.DEBUG)
-            .version(5)
+            .version(6)
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -410,7 +412,7 @@ class ShizukuInputBridge(private val context: Context) {
         y: Float,
         holdMs: Long = 35L,
         jitterPx: Int = 0,
-        mode: InputInjectionMode = InputInjectionMode.MOUSE
+        mode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN
     ): Boolean = withContext(Dispatchers.IO) {
         val service = injectorService ?: return@withContext false
         val offsetX = if (jitterPx > 0) Random.nextInt(-jitterPx, jitterPx + 1).toFloat() else 0f
@@ -419,7 +421,6 @@ class ShizukuInputBridge(private val context: Context) {
         val ty = (y + offsetY).coerceAtLeast(0f)
 
         when (mode) {
-            InputInjectionMode.MOUSE_HOVER_CLICK -> injectMouseHoverClick(service, tx, ty, holdMs)
             InputInjectionMode.CO_TOUCH_MULTIPLEX -> injectCoTouchTap(service, tx, ty, holdMs)
             else -> injectSinglePointerTap(service, tx, ty, holdMs, mode)
         }
@@ -432,7 +433,7 @@ class ShizukuInputBridge(private val context: Context) {
         endY: Float,
         durationMs: Long = 300L,
         steps: Int = 18,
-        mode: InputInjectionMode = InputInjectionMode.MOUSE
+        mode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN
     ): Boolean = withContext(Dispatchers.IO) {
         val service = injectorService ?: return@withContext false
         val safeSteps = steps.coerceIn(4, 120)
@@ -474,7 +475,7 @@ class ShizukuInputBridge(private val context: Context) {
             }
         }
 
-        val effectiveMode = if (mode == InputInjectionMode.MOUSE_HOVER_CLICK || mode == InputInjectionMode.CO_TOUCH_MULTIPLEX) {
+        val effectiveMode = if (mode == InputInjectionMode.CO_TOUCH_MULTIPLEX) {
             InputInjectionMode.TOUCHSCREEN
         } else {
             mode
@@ -524,22 +525,115 @@ class ShizukuInputBridge(private val context: Context) {
         upOk
     }
 
-    suspend fun pressKey(keyCode: Int): Boolean = withContext(Dispatchers.IO) {
+    suspend fun pressKey(
+        keyCode: Int,
+        holdMs: Long = 35L,
+        metaState: Int = 0
+    ): Boolean = withContext(Dispatchers.IO) {
         val service = injectorService ?: return@withContext false
-        val downTime = SystemClock.uptimeMillis()
-        val down = KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN, keyCode, 0).apply {
-            source = InputDevice.SOURCE_KEYBOARD
+        val safeHoldMs = holdMs.coerceIn(10L, 5000L)
+        val modKeyCodes = buildList {
+            if ((metaState and KeyEvent.META_CTRL_ON) != 0) add(KeyEvent.KEYCODE_CTRL_LEFT)
+            if ((metaState and KeyEvent.META_ALT_ON) != 0) add(KeyEvent.KEYCODE_ALT_LEFT)
+            if ((metaState and KeyEvent.META_SHIFT_ON) != 0) add(KeyEvent.KEYCODE_SHIFT_LEFT)
         }
-        val up = KeyEvent(downTime, downTime + 20L, KeyEvent.ACTION_UP, keyCode, 0).apply {
-            source = InputDevice.SOURCE_KEYBOARD
-        }
+        val keyLabel = "${KeyboardKeyCatalog.formatMetaPrefix(metaState)}${KeyboardKeyCatalog.labelForKeyCode(keyCode)}"
+
         try {
-            val d = service.injectInputEvent(down, MODE_WAIT_FOR_FINISH)
-            val u = service.injectInputEvent(up, MODE_WAIT_FOR_FINISH)
-            d && u
-        } catch (_: Throwable) {
+            val downTime = SystemClock.uptimeMillis()
+            var runningMeta = 0
+            for (modCode in modKeyCodes) {
+                runningMeta = runningMeta or modifierFlagForKeyCode(modCode)
+                val modDown = KeyEvent(
+                    downTime,
+                    SystemClock.uptimeMillis(),
+                    KeyEvent.ACTION_DOWN,
+                    modCode,
+                    0,
+                    runningMeta,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD,
+                    0,
+                    0,
+                    InputDevice.SOURCE_KEYBOARD
+                )
+                service.injectInputEvent(modDown, MODE_ASYNC)
+            }
+
+            val keyDownTime = SystemClock.uptimeMillis()
+            val down = KeyEvent(
+                keyDownTime,
+                keyDownTime,
+                KeyEvent.ACTION_DOWN,
+                keyCode,
+                0,
+                metaState,
+                KeyCharacterMap.VIRTUAL_KEYBOARD,
+                0,
+                0,
+                InputDevice.SOURCE_KEYBOARD
+            )
+            val downOk = service.injectInputEvent(down, MODE_ASYNC)
+            if (!downOk) {
+                val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
+                _diagnostics.update { it.copy(lastBypassReport = "Key $keyLabel DOWN blocked: $detail") }
+                return@withContext false
+            }
+
+            delay(safeHoldMs)
+
+            val up = KeyEvent(
+                keyDownTime,
+                SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP,
+                keyCode,
+                0,
+                metaState,
+                KeyCharacterMap.VIRTUAL_KEYBOARD,
+                0,
+                0,
+                InputDevice.SOURCE_KEYBOARD
+            )
+            val upOk = service.injectInputEvent(up, MODE_ASYNC)
+
+            for (modCode in modKeyCodes.asReversed()) {
+                runningMeta = runningMeta and modifierFlagForKeyCode(modCode).inv()
+                val modUp = KeyEvent(
+                    downTime,
+                    SystemClock.uptimeMillis(),
+                    KeyEvent.ACTION_UP,
+                    modCode,
+                    0,
+                    runningMeta,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD,
+                    0,
+                    0,
+                    InputDevice.SOURCE_KEYBOARD
+                )
+                service.injectInputEvent(modUp, MODE_ASYNC)
+            }
+
+            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
+            _diagnostics.update {
+                it.copy(
+                    lastBypassReport = if (upOk) {
+                        "Key $keyLabel (${safeHoldMs}ms) • $detail"
+                    } else {
+                        "Key $keyLabel UP failed: $detail"
+                    }
+                )
+            }
+            upOk
+        } catch (t: Throwable) {
+            _diagnostics.update { it.copy(lastBypassReport = "Key $keyLabel error: ${t.message}") }
             false
         }
+    }
+
+    private fun modifierFlagForKeyCode(modCode: Int): Int = when (modCode) {
+        KeyEvent.KEYCODE_CTRL_LEFT -> KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        KeyEvent.KEYCODE_ALT_LEFT -> KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+        KeyEvent.KEYCODE_SHIFT_LEFT -> KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        else -> 0
     }
 
     fun releaseActiveTouch() {
@@ -614,71 +708,6 @@ class ShizukuInputBridge(private val context: Context) {
             )
         }
         return upOk
-    }
-
-    private suspend fun injectMouseHoverClick(
-        service: IInputInjectorService,
-        tx: Float,
-        ty: Float,
-        holdMs: Long
-    ): Boolean {
-        val baseTime = SystemClock.uptimeMillis()
-        val hoverEnter = obtainPointerEvent(
-            downTime = baseTime,
-            eventTime = baseTime,
-            action = MotionEvent.ACTION_HOVER_MOVE,
-            x = tx,
-            y = ty,
-            mode = InputInjectionMode.MOUSE_HOVER_CLICK,
-            overrideButtonState = 0
-        )
-        val hoverOk = injectSafely(service, hoverEnter, MODE_ASYNC)
-        hoverEnter.recycle()
-        if (!hoverOk) {
-            val detail = runCatching { service.lastInjectDiagnostic }.getOrDefault("rejected")
-            _diagnostics.update { it.copy(lastBypassReport = "Hover Move failed: $detail") }
-            return false
-        }
-
-        val press = obtainPointerEvent(
-            downTime = baseTime,
-            eventTime = SystemClock.uptimeMillis(),
-            action = MotionEvent.ACTION_BUTTON_PRESS,
-            x = tx,
-            y = ty,
-            mode = InputInjectionMode.MOUSE_HOVER_CLICK,
-            overrideButtonState = MotionEvent.BUTTON_PRIMARY,
-            actionButton = MotionEvent.BUTTON_PRIMARY
-        )
-        val pressOk = injectSafely(service, press, MODE_ASYNC)
-        val pressDetail = runCatching { service.lastInjectDiagnostic }.getOrDefault("")
-        press.recycle()
-
-        if (holdMs > 0) delay(holdMs)
-
-        val release = obtainPointerEvent(
-            downTime = baseTime,
-            eventTime = SystemClock.uptimeMillis(),
-            action = MotionEvent.ACTION_BUTTON_RELEASE,
-            x = tx,
-            y = ty,
-            mode = InputInjectionMode.MOUSE_HOVER_CLICK,
-            overrideButtonState = 0,
-            actionButton = MotionEvent.BUTTON_PRIMARY
-        )
-        val releaseOk = injectSafely(service, release, MODE_ASYNC)
-        release.recycle()
-
-        _diagnostics.update {
-            it.copy(
-                lastBypassReport = if (pressOk && releaseOk) {
-                    "Hover Button Click dispatched at (${tx.toInt()}, ${ty.toInt()})"
-                } else {
-                    "Hover Button Click failed (press=$pressOk, rel=$releaseOk) • $pressDetail"
-                }
-            )
-        }
-        return pressOk && releaseOk
     }
 
     private suspend fun injectCoTouchTap(
@@ -987,28 +1016,17 @@ class ShizukuInputBridge(private val context: Context) {
         x: Float,
         y: Float,
         mode: InputInjectionMode,
-        deviceId: Int = 0,
-        overrideButtonState: Int? = null,
-        actionButton: Int? = null
+        deviceId: Int = 0
     ): MotionEvent {
         val toolType = when (mode) {
-            InputInjectionMode.MOUSE, InputInjectionMode.MOUSE_HOVER_CLICK -> MotionEvent.TOOL_TYPE_MOUSE
             InputInjectionMode.STYLUS -> MotionEvent.TOOL_TYPE_STYLUS
             InputInjectionMode.TOUCHSCREEN, InputInjectionMode.CO_TOUCH_MULTIPLEX -> MotionEvent.TOOL_TYPE_FINGER
         }
         val source = when (mode) {
-            InputInjectionMode.MOUSE, InputInjectionMode.MOUSE_HOVER_CLICK -> InputDevice.SOURCE_MOUSE
             InputInjectionMode.STYLUS -> InputDevice.SOURCE_STYLUS
             InputInjectionMode.TOUCHSCREEN, InputInjectionMode.CO_TOUCH_MULTIPLEX -> InputDevice.SOURCE_TOUCHSCREEN
         }
-        val isActivePress = action == MotionEvent.ACTION_DOWN ||
-            action == MotionEvent.ACTION_MOVE ||
-            action == MotionEvent.ACTION_BUTTON_PRESS
-        val buttonState = overrideButtonState ?: if (mode == InputInjectionMode.MOUSE && isActivePress) {
-            MotionEvent.BUTTON_PRIMARY
-        } else {
-            0
-        }
+        val isActivePress = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE
 
         val props = arrayOf(
             MotionEvent.PointerProperties().apply {
@@ -1033,7 +1051,7 @@ class ShizukuInputBridge(private val context: Context) {
             props,
             coords,
             0,
-            buttonState,
+            0,
             1.0f,
             1.0f,
             deviceId,
@@ -1042,13 +1060,6 @@ class ShizukuInputBridge(private val context: Context) {
             0
         )
         event.source = source
-        if (actionButton != null) {
-            runCatching {
-                val method = MotionEvent::class.java.getDeclaredMethod("setActionButton", Int::class.javaPrimitiveType)
-                method.isAccessible = true
-                method.invoke(event, actionButton)
-            }
-        }
         return event
     }
 

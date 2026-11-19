@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -94,19 +95,35 @@ sealed interface AppRoute {
 }
 
 class MainActivity : ComponentActivity() {
+
+    var sandboxKeyInterceptor: ((KeyEvent) -> Boolean)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             ShizuMacroTheme {
-                ShizuMacroRoot()
+                ShizuMacroRoot(
+                    onRegisterSandboxKeyInterceptor = { interceptor ->
+                        sandboxKeyInterceptor = interceptor
+                    }
+                )
             }
         }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val interceptor = sandboxKeyInterceptor
+        if (interceptor != null && interceptor(event)) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 }
 
 @Composable
 private fun ShizuMacroRoot(
+    onRegisterSandboxKeyInterceptor: (((KeyEvent) -> Boolean)?) -> Unit,
     viewModel: StudioViewModel = viewModel()
 ) {
     val navController = rememberNavController()
@@ -389,8 +406,12 @@ private fun ShizuMacroRoot(
                                 onCooperativeFingerUpdate = { down, x, y, downTime, devId, ptrId ->
                                     viewModel.updateCooperativeFingerState(down, x, y, downTime, devId, ptrId)
                                 },
+                                onTestKey = { keyCode, holdMs, metaState ->
+                                    viewModel.testShizukuKeyInSandbox(keyCode, holdMs, metaState)
+                                },
                                 onTestTap = { x, y, mode -> viewModel.testShizukuTapInSandbox(x, y, mode) },
-                                onTestSwipe = { sx, sy, ex, ey, mode -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey, mode) }
+                                onTestSwipe = { sx, sy, ex, ey, mode -> viewModel.testShizukuSwipeInSandbox(sx, sy, ex, ey, mode) },
+                                onRegisterKeyInterceptor = onRegisterSandboxKeyInterceptor
                             )
                         }
 

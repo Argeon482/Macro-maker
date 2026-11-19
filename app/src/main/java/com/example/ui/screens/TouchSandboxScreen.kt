@@ -2,12 +2,14 @@ package com.example.ui.screens
 
 import android.content.Context
 import android.graphics.RectF
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -24,15 +26,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Gesture
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -44,10 +50,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,9 +70,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
@@ -74,6 +80,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.model.InputInjectionMode
+import com.example.model.KeyCategory
+import com.example.model.KeyboardKeyCatalog
 import com.example.shizuku.HardwareInputDiagnostics
 import com.example.shizuku.ShizukuConnectionState
 import com.example.shizuku.ShizukuStatus
@@ -97,9 +105,9 @@ private data class SandboxTouchDot(
 )
 
 /**
- * Pure multi-pointer router shared by the unified Arena AndroidView and unit tests.
- * Routes every active pointer ID independently across Joystick and Target zones so
- * ACTION_POINTER_DOWN (Pointer 1 in Target) never drops even when Pointer 0 holds Joystick.
+ * Pure multi-pointer + keyboard router shared by the unified Arena AndroidView and unit tests.
+ * Routes active finger pointers across Joystick and Touch Target zones while tracking
+ * simultaneous keyboard events to verify zero collisions during active physical drags.
  */
 internal class SandboxMultiPointerRouter(
     private val onJoystickState: (
@@ -125,15 +133,57 @@ internal class SandboxMultiPointerRouter(
         isInjected: Boolean,
         countHit: Boolean,
         summaryOverride: String?
-    ) -> Unit
+    ) -> Unit,
+    private val onKeyEventReceived: (
+        keyLabel: String,
+        isDown: Boolean,
+        whileDragging: Boolean
+    ) -> Unit = { _, _, _ -> }
 ) {
     var activeJoystickPointerId: Int? = null
         private set
-    private var lastHoverButtonPressTime: Long = -1L
+    private var lastKeyDownTime: Long = -1L
+    private var lastKeyDownCode: Int = -1
 
     fun reset() {
         activeJoystickPointerId = null
-        lastHoverButtonPressTime = -1L
+        lastKeyDownTime = -1L
+        lastKeyDownCode = -1
+    }
+
+    fun handleKeyEvent(event: KeyEvent, selectedTestKeyCode: Int): Boolean {
+        val code = event.keyCode
+        // Always let hardware volume/power/system navigation keys pass through unless explicitly tested
+        if (code == KeyEvent.KEYCODE_VOLUME_UP ||
+            code == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            code == KeyEvent.KEYCODE_VOLUME_MUTE ||
+            code == KeyEvent.KEYCODE_POWER ||
+            code == KeyEvent.KEYCODE_HOME ||
+            code == KeyEvent.KEYCODE_APP_SWITCH
+        ) {
+            return false
+        }
+        if (code == KeyEvent.KEYCODE_BACK && selectedTestKeyCode != KeyEvent.KEYCODE_BACK) {
+            return false
+        }
+
+        val label = KeyboardKeyCatalog.labelForKeyCode(code)
+        val whileDragging = activeJoystickPointerId != null
+        return when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0 && (event.downTime != lastKeyDownTime || code != lastKeyDownCode)) {
+                    lastKeyDownTime = event.downTime
+                    lastKeyDownCode = code
+                    onKeyEventReceived(label, true, whileDragging)
+                }
+                true
+            }
+            KeyEvent.ACTION_UP -> {
+                onKeyEventReceived(label, false, whileDragging)
+                true
+            }
+            else -> false
+        }
     }
 
     fun handleTouchEvent(
@@ -310,69 +360,6 @@ internal class SandboxMultiPointerRouter(
         return true
     }
 
-    fun handleGenericMotion(
-        event: MotionEvent,
-        arenaWinX: Float,
-        arenaWinY: Float,
-        targetRectInWin: RectF
-    ): Boolean {
-        val action = event.actionMasked
-        val idx = event.actionIndex
-        val wx = arenaWinX + event.getX(idx)
-        val wy = arenaWinY + event.getY(idx)
-        if (!targetRectInWin.contains(wx, wy)) return false
-
-        val localX = wx - targetRectInWin.left
-        val localY = wy - targetRectInWin.top
-        val tool = toolName(event.getToolType(idx))
-        return when (action) {
-            MotionEvent.ACTION_BUTTON_PRESS -> {
-                if (event.eventTime != lastHoverButtonPressTime) {
-                    lastHoverButtonPressTime = event.eventTime
-                    onTargetEvent(localX, localY, "${tool}_BTN", true, true, null)
-                }
-                true
-            }
-            MotionEvent.ACTION_HOVER_MOVE -> {
-                onTargetEvent(localX, localY, "${tool}_HVR", true, false, null)
-                true
-            }
-            MotionEvent.ACTION_BUTTON_RELEASE -> {
-                onTargetEvent(localX, localY, "${tool}_BTN", true, false, "${tool}_BTN UP")
-                true
-            }
-            else -> false
-        }
-    }
-
-    fun handleComposeHoverOrButton(
-        type: PointerEventType,
-        pointerType: PointerType,
-        winPos: Offset,
-        uptimeMs: Long,
-        targetRectInWin: RectF
-    ) {
-        if (pointerType != PointerType.Mouse) return
-        if (!targetRectInWin.contains(winPos.x, winPos.y)) return
-        val localX = winPos.x - targetRectInWin.left
-        val localY = winPos.y - targetRectInWin.top
-        when (type) {
-            PointerEventType.Press -> {
-                if (uptimeMs != lastHoverButtonPressTime) {
-                    lastHoverButtonPressTime = uptimeMs
-                    onTargetEvent(localX, localY, "MOUSE_BTN", true, true, null)
-                }
-            }
-            PointerEventType.Move -> {
-                onTargetEvent(localX, localY, "MOUSE_HVR", true, false, null)
-            }
-            PointerEventType.Release -> {
-                onTargetEvent(localX, localY, "MOUSE_BTN", true, false, "MOUSE_BTN UP")
-            }
-            else -> Unit
-        }
-    }
-
     private fun clampJoystickOffset(wx: Float, wy: Float, rect: RectF): Offset {
         val cx = rect.centerX()
         val cy = rect.centerY()
@@ -390,8 +377,7 @@ internal class SandboxMultiPointerRouter(
 
 private class RawSandboxArenaView(
     context: Context,
-    var onTouchCallback: (view: View, event: MotionEvent) -> Boolean = { _, _ -> true },
-    var onGenericCallback: (view: View, event: MotionEvent) -> Boolean = { _, _ -> false }
+    var onTouchCallback: (view: View, event: MotionEvent) -> Boolean = { _, _ -> true }
 ) : View(context) {
     init {
         isClickable = true
@@ -402,10 +388,6 @@ private class RawSandboxArenaView(
         parent?.requestDisallowInterceptTouchEvent(true)
         return onTouchCallback(this, event)
     }
-
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        return onGenericCallback(this, event)
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -415,12 +397,18 @@ fun TouchSandboxScreen(
     hardwareDiagnostics: HardwareInputDiagnostics,
     onRefreshCapabilities: () -> Unit,
     onCooperativeFingerUpdate: (isDown: Boolean, screenX: Float, screenY: Float, downTime: Long, deviceId: Int, pointerId: Int) -> Unit,
+    onTestKey: (keyCode: Int, holdMs: Long, metaState: Int) -> Unit,
     onTestTap: (x: Float, y: Float, mode: InputInjectionMode) -> Unit,
     onTestSwipe: (sx: Float, sy: Float, ex: Float, ey: Float, mode: InputInjectionMode) -> Unit,
+    onRegisterKeyInterceptor: (((KeyEvent) -> Boolean)?) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedMode by remember { mutableStateOf(InputInjectionMode.MOUSE_HOVER_CLICK) }
-    var autoBurstRunning by remember { mutableStateOf(false) }
+    var selectedTouchMode by remember { mutableStateOf(InputInjectionMode.TOUCHSCREEN) }
+    var selectedKeyCode by remember { mutableIntStateOf(KeyEvent.KEYCODE_SPACE) }
+    var selectedKeyLabel by remember { mutableStateOf("Space") }
+    var showAllKeysDialog by remember { mutableStateOf(false) }
+
+    var autoKeyBurstRunning by remember { mutableStateOf(false) }
     var liveGuardEnabled by remember { mutableStateOf(false) }
     var queuedGuardTap by remember { mutableStateOf(false) }
     var queuedGuardSwipe by remember { mutableStateOf(false) }
@@ -431,16 +419,20 @@ fun TouchSandboxScreen(
     var dragMoveSamples by remember { mutableIntStateOf(0) }
     var collisionCancelCount by remember { mutableIntStateOf(0) }
     var fingerDeviceId by remember { mutableIntStateOf(0) }
-    var lastFingerSummary by remember { mutableStateOf("Hold & drag joystick while Auto-Tap runs") }
+    var lastFingerSummary by remember { mutableStateOf("Hold & drag joystick while Auto-Key fires") }
 
-    // Injected target & swipe pad telemetry
+    // Keyboard receiver telemetry
+    var keyHits by remember { mutableIntStateOf(0) }
+    var coKeyWhileDraggingHits by remember { mutableIntStateOf(0) }
+    var isKeyCurrentlyDown by remember { mutableStateOf(false) }
+    var lastReceivedKey by remember { mutableStateOf("NONE") }
+
+    // Touch target & swipe pad telemetry
     var targetHits by remember { mutableIntStateOf(0) }
-    var lastReceivedTool by remember { mutableStateOf("NONE") }
-    var lastTargetSummary by remember { mutableStateOf("Waiting for injected tap or hover click") }
+    var lastTargetSummary by remember { mutableStateOf("Waiting for Key or Touch input") }
 
     var joystickWindowRect by remember { mutableStateOf(RectF()) }
     var targetWindowRect by remember { mutableStateOf(RectF()) }
-    var arenaWindowOrigin by remember { mutableStateOf(Offset.Zero) }
     var padScreenOrigin by remember { mutableStateOf(Offset.Zero) }
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     var targetScreenCenter by remember { mutableStateOf(Offset.Zero) }
@@ -448,7 +440,7 @@ fun TouchSandboxScreen(
     val recentDots = remember { mutableStateListOf<SandboxTouchDot>() }
     val hostView = LocalView.current
 
-    fun recordHitOrDot(
+    fun recordTouchHitOrDot(
         x: Float,
         y: Float,
         toolLabel: String,
@@ -456,7 +448,6 @@ fun TouchSandboxScreen(
         countHit: Boolean,
         summaryOverride: String?
     ) {
-        lastReceivedTool = toolLabel
         recentDots.add(SandboxTouchDot(x, y, isInjected))
         if (recentDots.size > 28) recentDots.removeAt(0)
         if (summaryOverride != null) {
@@ -469,7 +460,7 @@ fun TouchSandboxScreen(
             val hitTarget = padSize.width > 0 && hypot(x - cx, y - cy) <= targetRadiusPx.toFloat()
             if (hitTarget) {
                 targetHits++
-                lastTargetSummary = "Hit #$targetHits via $toolLabel"
+                lastTargetSummary = "Touch Hit #$targetHits ($toolLabel)"
             } else {
                 lastTargetSummary = "$toolLabel (${x.toInt()}, ${y.toInt()})"
             }
@@ -490,9 +481,33 @@ fun TouchSandboxScreen(
             },
             onCooperativeFingerUpdate = onCooperativeFingerUpdate,
             onTargetEvent = { lx, ly, tool, isInjected, countHit, overrideSummary ->
-                recordHitOrDot(lx, ly, tool, isInjected, countHit, overrideSummary)
+                recordTouchHitOrDot(lx, ly, tool, isInjected, countHit, overrideSummary)
+            },
+            onKeyEventReceived = { label, isDown, whileDragging ->
+                lastReceivedKey = label
+                isKeyCurrentlyDown = isDown
+                if (isDown) {
+                    keyHits++
+                    if (whileDragging) {
+                        coKeyWhileDraggingHits++
+                        lastTargetSummary = "CO-KEY #$coKeyWhileDraggingHits ($label) while DRAGGING!"
+                    } else {
+                        lastTargetSummary = "Key #$keyHits ($label) DOWN"
+                    }
+                } else {
+                    lastTargetSummary = "Key $label UP"
+                }
             }
         )
+    }
+
+    DisposableEffect(selectedKeyCode) {
+        onRegisterKeyInterceptor { event ->
+            arenaRouter.handleKeyEvent(event, selectedKeyCode)
+        }
+        onDispose {
+            onRegisterKeyInterceptor(null)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -506,7 +521,7 @@ fun TouchSandboxScreen(
         touchGuardYielding,
         queuedGuardTap,
         queuedGuardSwipe,
-        selectedMode,
+        selectedTouchMode,
         targetScreenCenter,
         padScreenOrigin,
         padSize
@@ -515,29 +530,23 @@ fun TouchSandboxScreen(
             delay(65L)
             if (queuedGuardTap && targetScreenCenter != Offset.Zero) {
                 queuedGuardTap = false
-                onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedMode)
+                onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedTouchMode)
             }
             if (queuedGuardSwipe && padSize.width > 0) {
                 queuedGuardSwipe = false
                 val sx = padScreenOrigin.x + padSize.width * 0.2f
                 val ex = padScreenOrigin.x + padSize.width * 0.8f
                 val sy = padScreenOrigin.y + padSize.height * 0.82f
-                onTestSwipe(sx, sy, ex, sy, selectedMode)
+                onTestSwipe(sx, sy, ex, sy, selectedTouchMode)
             }
         }
     }
 
-    LaunchedEffect(autoBurstRunning, selectedMode, targetScreenCenter, liveGuardEnabled) {
-        if (autoBurstRunning && targetScreenCenter != Offset.Zero) {
-            while (autoBurstRunning) {
-                val blockedByGuard = liveGuardEnabled &&
-                    (isFingerDragging || hardwareDiagnostics.cooperativeFingerDown)
-                if (blockedByGuard) {
-                    delay(45L)
-                } else {
-                    onTestTap(targetScreenCenter.x, targetScreenCenter.y, selectedMode)
-                    delay(420L)
-                }
+    LaunchedEffect(autoKeyBurstRunning, selectedKeyCode) {
+        if (autoKeyBurstRunning) {
+            while (autoKeyBurstRunning) {
+                onTestKey(selectedKeyCode, 35L, 0)
+                delay(320L)
             }
         }
     }
@@ -550,8 +559,8 @@ fun TouchSandboxScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = ObsidianBg),
                 title = {
                     Column {
-                        Text("Touch Sandbox", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-                        Text("INPUTDISPATCHER & CO-TOUCH VERIFIER", style = MaterialTheme.typography.labelSmall, color = ElectricCyan)
+                        Text("Input Sandbox", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+                        Text("KEYBOARD & TOUCH COLLISION VERIFIER", style = MaterialTheme.typography.labelSmall, color = ElectricCyan)
                     }
                 },
                 actions = {
@@ -564,13 +573,16 @@ fun TouchSandboxScreen(
                     IconButton(
                         onClick = {
                             arenaRouter.reset()
+                            keyHits = 0
+                            coKeyWhileDraggingHits = 0
+                            isKeyCurrentlyDown = false
+                            lastReceivedKey = "NONE"
                             targetHits = 0
                             dragMoveSamples = 0
                             collisionCancelCount = 0
-                            lastReceivedTool = "NONE"
                             recentDots.clear()
                             lastFingerSummary = "Reset — hold & drag joystick"
-                            lastTargetSummary = "Waiting for injected tap or hover click"
+                            lastTargetSummary = "Waiting for Key or Touch input"
                         },
                         modifier = Modifier.size(48.dp)
                     ) {
@@ -590,10 +602,10 @@ fun TouchSandboxScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .widthIn(max = 760.dp)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Telemetry, Hardware Probe & Mode Selector Card
+                // Telemetry, Keyboard Picker & Touch Mode Card
                 Card(
                     colors = CardDefaults.cardColors(containerColor = SlateSurface),
                     border = BorderStroke(1.dp, if (collisionCancelCount > 0) RoseAlert else HairlineBorder),
@@ -625,35 +637,65 @@ fun TouchSandboxScreen(
                             )
                         }
 
-                        val evdevLabel = when {
-                            hardwareDiagnostics.devInputWritable ->
-                                "evdev: RW (${hardwareDiagnostics.physicalTouchDeviceName})"
-                            hardwareDiagnostics.devInputReadable ->
-                                "evdev: RO (${hardwareDiagnostics.physicalTouchDeviceName})"
-                            else -> "evdev: SELinux-blocked"
-                        }
-                        val uhidLabel = if (hardwareDiagnostics.uhidWritable) "uhid: RW" else "uhid: Blocked"
-                        val monitorLabel = if (hardwareDiagnostics.touchMonitorRunning) "GuardMon: LIVE" else "GuardMon: OFF"
-                        Text(
-                            text = "$evdevLabel • $uhidLabel • $monitorLabel",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (hardwareDiagnostics.uhidWritable || hardwareDiagnostics.devInputWritable) {
-                                EmeraldRun
-                            } else {
-                                AmberLogic
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-
-                        FlowRow(
+                        // Quick Test Key Selector (single horizontal row so arena stays spacious)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Text(
+                                text = "KEY:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ElectricCyan,
+                                fontWeight = FontWeight.Bold
+                            )
+                            KeyboardKeyCatalog.sandboxQuickKeys.forEach { opt ->
+                                FilterChip(
+                                    selected = selectedKeyCode == opt.keyCode,
+                                    onClick = {
+                                        selectedKeyCode = opt.keyCode
+                                        selectedKeyLabel = opt.label
+                                    },
+                                    label = { Text(opt.label) },
+                                    modifier = Modifier.testTag("sandbox_key_${opt.keyCode}")
+                                )
+                            }
+                            FilterChip(
+                                selected = KeyboardKeyCatalog.sandboxQuickKeys.none { it.keyCode == selectedKeyCode },
+                                onClick = { showAllKeysDialog = true },
+                                label = {
+                                    Text(
+                                        if (KeyboardKeyCatalog.sandboxQuickKeys.none { it.keyCode == selectedKeyCode }) {
+                                            "More ($selectedKeyLabel)"
+                                        } else {
+                                            "More..."
+                                        }
+                                    )
+                                },
+                                modifier = Modifier.testTag("sandbox_more_keys_chip")
+                            )
+                        }
+
+                        // Touch Modes (Touch, Co-Touch, Stylus) + Live Guard Toggle
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "TOUCH:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary,
+                                fontWeight = FontWeight.Bold
+                            )
                             InputInjectionMode.entries.forEach { mode ->
                                 FilterChip(
-                                    selected = selectedMode == mode,
-                                    onClick = { selectedMode = mode },
+                                    selected = selectedTouchMode == mode,
+                                    onClick = { selectedTouchMode = mode },
                                     label = { Text(mode.displayLabel) },
                                     modifier = Modifier.testTag("sandbox_mode_${mode.name.lowercase()}")
                                 )
@@ -669,7 +711,7 @@ fun TouchSandboxScreen(
                                 },
                                 label = {
                                     Text(
-                                        text = when {
+                                        when {
                                             touchGuardYielding -> "Guard: YIELDING"
                                             liveGuardEnabled -> "Guard: Live Hold"
                                             else -> "Guard: Off"
@@ -687,7 +729,6 @@ fun TouchSandboxScreen(
                             Text(
                                 text = when {
                                     touchGuardYielding -> "Guard: YIELDING (Finger held)"
-                                    queuedGuardTap || queuedGuardSwipe -> "Guard: QUEUED until release"
                                     isFingerDragging -> "Finger: DRAGGING ($dragMoveSamples)"
                                     else -> "Finger: IDLE ($dragMoveSamples)"
                                 },
@@ -699,9 +740,10 @@ fun TouchSandboxScreen(
                                 }
                             )
                             Text(
-                                text = "Last Tool: $lastReceivedTool",
+                                text = "Co-Key While Drag: $coKeyWhileDraggingHits",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = ElectricCyan
+                                fontWeight = FontWeight.Bold,
+                                color = if (coKeyWhileDraggingHits > 0 && collisionCancelCount == 0) EmeraldRun else ElectricCyan
                             )
                         }
 
@@ -718,7 +760,7 @@ fun TouchSandboxScreen(
                             color = if (hardwareDiagnostics.lastBypassReport.contains("blocked", ignoreCase = true) ||
                                 hardwareDiagnostics.lastBypassReport.contains("failed", ignoreCase = true)
                             ) RoseAlert else ElectricCyan.copy(alpha = 0.9f),
-                            maxLines = 2,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -729,24 +771,6 @@ fun TouchSandboxScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                        .onGloballyPositioned { coords ->
-                            arenaWindowOrigin = coords.positionInWindow()
-                        }
-                        .pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val pe = awaitPointerEvent()
-                                    val first = pe.changes.firstOrNull() ?: continue
-                                    arenaRouter.handleComposeHoverOrButton(
-                                        type = pe.type,
-                                        pointerType = first.type,
-                                        winPos = first.position + arenaWindowOrigin,
-                                        uptimeMs = first.uptimeMillis,
-                                        targetRectInWin = targetWindowRect
-                                    )
-                                }
-                            }
-                        }
                 ) {
                     val sideBySide = maxWidth >= 540.dp
                     if (sideBySide) {
@@ -763,7 +787,12 @@ fun TouchSandboxScreen(
                                     .fillMaxHeight()
                             )
 
-                            TargetAndSwipePad(
+                            KeyAndTouchReceiverPad(
+                                keyHits = keyHits,
+                                coKeyWhileDraggingHits = coKeyWhileDraggingHits,
+                                lastReceivedKey = lastReceivedKey,
+                                isKeyCurrentlyDown = isKeyCurrentlyDown,
+                                collisionCancelCount = collisionCancelCount,
                                 targetHits = targetHits,
                                 recentDots = recentDots,
                                 hostView = hostView,
@@ -786,7 +815,12 @@ fun TouchSandboxScreen(
                             modifier = Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            TargetAndSwipePad(
+                            KeyAndTouchReceiverPad(
+                                keyHits = keyHits,
+                                coKeyWhileDraggingHits = coKeyWhileDraggingHits,
+                                lastReceivedKey = lastReceivedKey,
+                                isKeyCurrentlyDown = isKeyCurrentlyDown,
+                                collisionCancelCount = collisionCancelCount,
                                 targetHits = targetHits,
                                 recentDots = recentDots,
                                 hostView = hostView,
@@ -801,7 +835,7 @@ fun TouchSandboxScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .weight(1f)
+                                    .weight(1.05f)
                             )
 
                             JoystickDragZone(
@@ -815,7 +849,6 @@ fun TouchSandboxScreen(
                         }
                     }
 
-                    // Unified Arena receiver: handles Pointer 0 (Joystick) + Pointer 1+ (Target) together
                     val onArenaTouch: (View, MotionEvent) -> Boolean = { view, event ->
                         val winLoc = IntArray(2)
                         val screenLoc = IntArray(2)
@@ -829,17 +862,7 @@ fun TouchSandboxScreen(
                             arenaScreenY = screenLoc[1].toFloat(),
                             joystickRectInWin = joystickWindowRect,
                             targetRectInWin = targetWindowRect,
-                            selectedModeLabel = selectedMode.displayLabel
-                        )
-                    }
-                    val onArenaGeneric: (View, MotionEvent) -> Boolean = { view, event ->
-                        val winLoc = IntArray(2)
-                        view.getLocationInWindow(winLoc)
-                        arenaRouter.handleGenericMotion(
-                            event = event,
-                            arenaWinX = winLoc[0].toFloat(),
-                            arenaWinY = winLoc[1].toFloat(),
-                            targetRectInWin = targetWindowRect
+                            selectedModeLabel = selectedTouchMode.displayLabel
                         )
                     }
 
@@ -847,13 +870,11 @@ fun TouchSandboxScreen(
                         factory = { ctx ->
                             RawSandboxArenaView(
                                 ctx,
-                                onTouchCallback = onArenaTouch,
-                                onGenericCallback = onArenaGeneric
+                                onTouchCallback = onArenaTouch
                             )
                         },
                         update = { view ->
                             view.onTouchCallback = onArenaTouch
-                            view.onGenericCallback = onArenaGeneric
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -861,36 +882,49 @@ fun TouchSandboxScreen(
                     )
                 }
 
-                // Trigger Buttons Row
+                // Trigger Buttons Row: Auto-Key, Single Key, Touch Tap, Touch Swipe
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Button(
-                        onClick = { autoBurstRunning = !autoBurstRunning },
+                        onClick = { autoKeyBurstRunning = !autoKeyBurstRunning },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (autoBurstRunning) RoseAlert else EmeraldRun,
+                            containerColor = if (autoKeyBurstRunning) RoseAlert else EmeraldRun,
                             contentColor = Color(0xFF04131A)
                         ),
                         modifier = Modifier
-                            .weight(1.1f)
+                            .weight(1.25f)
                             .height(48.dp)
-                            .testTag("sandbox_auto_burst_btn")
+                            .testTag("sandbox_auto_key_btn")
                     ) {
                         Icon(
-                            imageVector = if (autoBurstRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            imageVector = if (autoKeyBurstRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            text = if (autoBurstRunning) "Stop Burst" else "Auto-Tap",
+                            text = if (autoKeyBurstRunning) "Stop" else "Auto-Key",
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
                         )
                     }
 
                     Button(
+                        onClick = { onTestKey(selectedKeyCode, 35L, 0) },
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color(0xFF04131A)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("sandbox_test_key_btn")
+                    ) {
+                        Icon(Icons.Default.Keyboard, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(selectedKeyLabel, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    OutlinedButton(
                         onClick = {
                             if (touchGuardYielding) {
                                 queuedGuardTap = true
@@ -905,18 +939,17 @@ fun TouchSandboxScreen(
                                 } else {
                                     padScreenOrigin.y + padSize.height / 2f
                                 }
-                                onTestTap(cx, cy, selectedMode)
+                                onTestTap(cx, cy, selectedTouchMode)
                             }
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color(0xFF04131A)),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(0.95f)
                             .height(48.dp)
                             .testTag("sandbox_test_tap_btn")
                     ) {
-                        Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (queuedGuardTap) "Queued" else "Tap", fontWeight = FontWeight.Bold, maxLines = 1)
+                        Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp), tint = ElectricCyan)
+                        Spacer(Modifier.width(3.dp))
+                        Text(if (queuedGuardTap) "Wait" else "Tap", color = TextPrimary, maxLines = 1)
                     }
 
                     OutlinedButton(
@@ -927,22 +960,84 @@ fun TouchSandboxScreen(
                                 val sx = padScreenOrigin.x + padSize.width * 0.2f
                                 val ex = padScreenOrigin.x + padSize.width * 0.8f
                                 val sy = padScreenOrigin.y + padSize.height * 0.82f
-                                onTestSwipe(sx, sy, ex, sy, selectedMode)
+                                onTestSwipe(sx, sy, ex, sy, selectedTouchMode)
                             }
                         },
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(0.95f)
                             .height(48.dp)
                             .testTag("sandbox_test_swipe_btn")
                     ) {
-                        Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp), tint = AmberLogic)
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (queuedGuardSwipe) "Queued" else "Swipe", color = TextPrimary, maxLines = 1)
+                        Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(16.dp), tint = AmberLogic)
+                        Spacer(Modifier.width(3.dp))
+                        Text(if (queuedGuardSwipe) "Wait" else "Swipe", color = TextPrimary, maxLines = 1)
                     }
                 }
             }
         }
     }
+
+    if (showAllKeysDialog) {
+        SandboxAllKeysDialog(
+            currentKeyCode = selectedKeyCode,
+            onSelectKey = { code, label ->
+                selectedKeyCode = code
+                selectedKeyLabel = label
+                showAllKeysDialog = false
+            },
+            onDismiss = { showAllKeysDialog = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SandboxAllKeysDialog(
+    currentKeyCode: Int,
+    onSelectKey: (keyCode: Int, label: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var category by remember { mutableStateOf(KeyCategory.LETTERS) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SlateSurface,
+        title = { Text("Select Test Key", color = TextPrimary) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    KeyCategory.entries.forEach { cat ->
+                        FilterChip(
+                            selected = category == cat,
+                            onClick = { category = cat },
+                            label = { Text(cat.title) }
+                        )
+                    }
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    KeyboardKeyCatalog.optionsForCategory(category).forEach { opt ->
+                        FilterChip(
+                            selected = opt.keyCode == currentKeyCode,
+                            onClick = { onSelectKey(opt.keyCode, opt.label) },
+                            label = { Text(opt.label) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = ElectricCyan)
+            }
+        }
+    )
 }
 
 @Composable
@@ -1015,7 +1110,12 @@ private fun JoystickDragZone(
 }
 
 @Composable
-private fun TargetAndSwipePad(
+private fun KeyAndTouchReceiverPad(
+    keyHits: Int,
+    coKeyWhileDraggingHits: Int,
+    lastReceivedKey: String,
+    isKeyCurrentlyDown: Boolean,
+    collisionCancelCount: Int,
     targetHits: Int,
     recentDots: List<SandboxTouchDot>,
     hostView: View,
@@ -1028,7 +1128,11 @@ private fun TargetAndSwipePad(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
             .background(SlateWell)
-            .border(1.dp, HairlineBorder, RoundedCornerShape(18.dp))
+            .border(
+                width = if (isKeyCurrentlyDown) 2.dp else 1.dp,
+                color = if (isKeyCurrentlyDown) ElectricCyan else HairlineBorder,
+                shape = RoundedCornerShape(18.dp)
+            )
             .onGloballyPositioned { coords ->
                 val winLoc = IntArray(2)
                 hostView.getLocationOnScreen(winLoc)
@@ -1071,21 +1175,68 @@ private fun TargetAndSwipePad(
             }
         }
 
-        Text(
-            text = "AUTO-TAP & HOVER TARGET",
-            style = MaterialTheme.typography.labelSmall,
-            color = TextSecondary,
+        // Top Live Keyboard Receiver Banner
+        Surface(
+            color = if (isKeyCurrentlyDown) ElectricCyan.copy(alpha = 0.22f) else SlateSurface.copy(alpha = 0.92f),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(
+                1.dp,
+                when {
+                    isKeyCurrentlyDown -> ElectricCyan
+                    coKeyWhileDraggingHits > 0 && collisionCancelCount == 0 -> EmeraldRun
+                    else -> HairlineBorder
+                }
+            ),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 10.dp)
-        )
+                .padding(horizontal = 10.dp, vertical = 10.dp)
+                .fillMaxWidth()
+                .testTag("sandbox_key_receiver_panel")
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Keyboard,
+                        contentDescription = null,
+                        tint = if (isKeyCurrentlyDown) ElectricCyan else EmeraldRun,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "KEYS: $keyHits ($lastReceivedKey)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        maxLines = 1
+                    )
+                }
+                Text(
+                    text = if (coKeyWhileDraggingHits > 0 && collisionCancelCount == 0) {
+                        "CO-OK ($coKeyWhileDraggingHits)"
+                    } else {
+                        "KEY RECEIVER"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (coKeyWhileDraggingHits > 0 && collisionCancelCount == 0) EmeraldRun else TextSecondary
+                )
+            }
+        }
 
+        // Touch Target Circle (keeps touch tap/swipe verification alive)
         Box(
             modifier = Modifier
                 .align(Alignment.Center)
-                .size(128.dp)
+                .padding(top = 26.dp)
+                .size(114.dp)
                 .clip(CircleShape)
-                .background(if (targetHits % 2 == 0) EmeraldRun.copy(alpha = 0.22f) else AmberLogic.copy(alpha = 0.22f))
+                .background(if (targetHits % 2 == 0) EmeraldRun.copy(alpha = 0.20f) else AmberLogic.copy(alpha = 0.20f))
                 .border(
                     2.dp,
                     if (targetHits % 2 == 0) EmeraldRun else AmberLogic,
@@ -1109,11 +1260,11 @@ private fun TargetAndSwipePad(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = "$targetHits",
-                    style = MaterialTheme.typography.headlineLarge,
+                    style = MaterialTheme.typography.headlineMedium,
                     color = TextPrimary
                 )
                 Text(
-                    text = "HITS",
+                    text = "TOUCH HITS",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (targetHits % 2 == 0) EmeraldRun else AmberLogic
                 )
@@ -1123,9 +1274,8 @@ private fun TargetAndSwipePad(
 }
 
 private fun toolName(toolType: Int): String = when (toolType) {
-    MotionEvent.TOOL_TYPE_MOUSE -> "MOUSE"
     MotionEvent.TOOL_TYPE_STYLUS -> "STYLUS"
     MotionEvent.TOOL_TYPE_ERASER -> "ERASER"
     MotionEvent.TOOL_TYPE_FINGER -> "FINGER"
-    else -> "UNKNOWN"
+    else -> "TOUCH"
 }

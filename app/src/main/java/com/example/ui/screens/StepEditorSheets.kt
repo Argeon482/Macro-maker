@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import android.view.KeyEvent
 import com.example.data.TemplateAssetEntity
 import com.example.model.BranchAction
 import com.example.model.DelayStep
@@ -69,7 +70,9 @@ import com.example.model.IfColorStep
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
 import com.example.model.JumpStep
+import com.example.model.KeyCategory
 import com.example.model.KeyPressStep
+import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroStep
@@ -127,8 +130,22 @@ fun AddStepBottomSheet(
                 AddNodeTile("Wait / Delay", "Fixed or randomized pause (ms)", Icons.Default.HourglassBottom, ElectricCyan) {
                     onAddSteps(listOf(DelayStep()))
                 }
-                AddNodeTile("System Key", "Back, Home, or Recents via Shizuku", Icons.Default.Keyboard, ElectricCyan) {
-                    onAddSteps(listOf(KeyPressStep()))
+                AddNodeTile(
+                    "Key Press (Keyboard / Game)",
+                    "Send any keyboard, game, or system key (no touch collision)",
+                    Icons.Default.Keyboard,
+                    ElectricCyan
+                ) {
+                    onAddSteps(
+                        listOf(
+                            KeyPressStep(
+                                label = "Key Space",
+                                customKeyCode = KeyEvent.KEYCODE_SPACE,
+                                keyLabel = "Space",
+                                holdMs = 35L
+                            )
+                        )
+                    )
                 }
             }
 
@@ -364,19 +381,97 @@ fun EditStepBottomSheet(
                 }
 
                 is KeyPressStep -> {
-                    var selectedKey by remember(step) { mutableStateOf(step.keyAction) }
-                    Text("System Key Action", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SystemKeyAction.entries.forEach { action ->
+                    var selectedCategory by remember(step) {
+                        val code = step.resolvedKeyCode()
+                        val matched = KeyboardKeyCatalog.allOptions.firstOrNull { it.keyCode == code }?.category
+                            ?: KeyCategory.GAME_ACTION
+                        mutableStateOf(matched)
+                    }
+                    var keyCode by remember(step) { mutableStateOf(step.resolvedKeyCode()) }
+                    var keyCodeText by remember(step) { mutableStateOf(step.resolvedKeyCode().toString()) }
+                    var keyLabel by remember(step) { mutableStateOf(step.resolvedKeyLabel()) }
+                    var holdStr by remember(step) { mutableStateOf(step.holdMs.toString()) }
+                    var useShift by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_SHIFT_ON) != 0) }
+                    var useCtrl by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_CTRL_ON) != 0) }
+                    var useAlt by remember(step) { mutableStateOf((step.metaState and KeyEvent.META_ALT_ON) != 0) }
+
+                    Text("Key Category", style = MaterialTheme.typography.labelMedium, color = ElectricCyan)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        KeyCategory.entries.forEach { cat ->
                             FilterChip(
-                                selected = selectedKey == action,
-                                onClick = { selectedKey = action },
-                                label = { Text(action.displayLabel) }
+                                selected = selectedCategory == cat,
+                                onClick = { selectedCategory = cat },
+                                label = { Text(cat.title) },
+                                modifier = Modifier.testTag("key_cat_${cat.name.lowercase()}")
                             )
                         }
                     }
+
+                    Text(
+                        text = "Selected Key: $keyLabel (Android KeyCode $keyCode)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextPrimary
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        KeyboardKeyCatalog.optionsForCategory(selectedCategory).forEach { opt ->
+                            FilterChip(
+                                selected = keyCode == opt.keyCode,
+                                onClick = {
+                                    keyCode = opt.keyCode
+                                    keyCodeText = opt.keyCode.toString()
+                                    keyLabel = opt.label
+                                    if (label.startsWith("Key ") || label == "Key Press" || label == "System Key") {
+                                        label = "Key ${opt.label}"
+                                    }
+                                },
+                                label = { Text(opt.label) },
+                                modifier = Modifier.testTag("key_opt_${opt.keyCode}")
+                            )
+                        }
+                    }
+
+                    Text("Modifiers (Optional)", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = useShift, onClick = { useShift = !useShift }, label = { Text("Shift") })
+                        FilterChip(selected = useCtrl, onClick = { useCtrl = !useCtrl }, label = { Text("Ctrl") })
+                        FilterChip(selected = useAlt, onClick = { useAlt = !useAlt }, label = { Text("Alt") })
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NumField("Hold (ms)", holdStr, { holdStr = it }, Modifier.weight(1f))
+                        NumField(
+                            "KeyCode",
+                            keyCodeText,
+                            { raw ->
+                                keyCodeText = raw
+                                raw.toIntOrNull()?.let { parsed ->
+                                    keyCode = parsed
+                                    keyLabel = KeyboardKeyCatalog.labelForKeyCode(parsed)
+                                }
+                            },
+                            Modifier.weight(1f)
+                        )
+                    }
+
                     SaveStepActions(onDismiss) {
-                        onSave(step.copy(label = label.ifBlank { "Key ${selectedKey.displayLabel}" }, keyAction = selectedKey))
+                        val meta = (if (useShift) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0) or
+                            (if (useCtrl) KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON else 0) or
+                            (if (useAlt) KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON else 0)
+                        val matchedSys = SystemKeyAction.entries.firstOrNull { it.keyCode == keyCode } ?: step.keyAction
+                        val resolvedLabel = keyLabel.ifBlank { KeyboardKeyCatalog.labelForKeyCode(keyCode) }
+                        onSave(
+                            step.copy(
+                                label = label.ifBlank { "Key $resolvedLabel" },
+                                keyAction = matchedSys,
+                                customKeyCode = keyCode,
+                                keyLabel = resolvedLabel,
+                                holdMs = (holdStr.toLongOrNull() ?: step.holdMs).coerceIn(10L, 5000L),
+                                metaState = meta
+                            )
+                        )
                     }
                 }
 

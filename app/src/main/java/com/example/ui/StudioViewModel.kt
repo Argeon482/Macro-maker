@@ -18,6 +18,7 @@ import com.example.model.IfColorStep
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
 import com.example.model.InputInjectionMode
+import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
@@ -286,7 +287,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun testShizukuTapInSandbox(
         x: Float,
         y: Float,
-        mode: InputInjectionMode = InputInjectionMode.MOUSE
+        mode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN
     ) {
         viewModelScope.launch {
             val ok = shizukuBridge.tap(x, y, holdMs = 45L, jitterPx = 0, mode = mode)
@@ -309,7 +310,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         sy: Float,
         ex: Float,
         ey: Float,
-        mode: InputInjectionMode = InputInjectionMode.MOUSE
+        mode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN
     ) {
         viewModelScope.launch {
             val ok = shizukuBridge.swipe(sx, sy, ex, ey, durationMs = 280L, steps = 16, mode = mode)
@@ -323,6 +324,28 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
             } else if (!shizukuStatus.value.userServiceReady) {
                 _notices.tryEmit(UiNotice.Message("Shizuku is not connected.", isError = true))
+            }
+        }
+    }
+
+    fun testShizukuKeyInSandbox(
+        keyCode: Int,
+        holdMs: Long = 35L,
+        metaState: Int = 0
+    ) {
+        viewModelScope.launch {
+            val ok = shizukuBridge.pressKey(keyCode, holdMs = holdMs, metaState = metaState)
+            val binding = "${KeyboardKeyCatalog.formatMetaPrefix(metaState)}${KeyboardKeyCatalog.labelForKeyCode(keyCode)}"
+            if (ok) {
+                repository.appendLog(
+                    "sandbox",
+                    "Touch Sandbox",
+                    "Key Test",
+                    "Injected Key $binding (${holdMs}ms)",
+                    LogLevel.SUCCESS
+                )
+            } else if (!shizukuStatus.value.userServiceReady) {
+                _notices.tryEmit(UiNotice.Message("Shizuku is not connected. Start Shizuku & grant permission first.", isError = true))
             }
         }
     }

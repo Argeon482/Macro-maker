@@ -39,11 +39,9 @@ enum class SystemKeyAction(val keyCode: Int, val displayLabel: String) {
 
 @Serializable
 enum class InputInjectionMode(val displayLabel: String, val shortDesc: String) {
-    MOUSE("Mouse", "Mouse pointer click (ACTION_DOWN/UP)"),
-    MOUSE_HOVER_CLICK("Hover Click", "No-DOWN generic button click (tests TouchState bypass)"),
-    CO_TOUCH_MULTIPLEX("Co-Touch", "Injects Pointer 1 alongside live Finger Slot 0 on physical device"),
-    STYLUS("Stylus", "Separate pen stream (Android 13+ / pen apps)"),
-    TOUCHSCREEN("Touch", "Standard finger touch stream")
+    TOUCHSCREEN("Touch", "Standard finger touch stream (pair with Touch Guard or Keyboard steps)"),
+    CO_TOUCH_MULTIPLEX("Co-Touch", "Kernel UHID / evdev touch stream alongside physical finger"),
+    STYLUS("Stylus", "Separate pen stream (Android 13+ / pen apps)")
 }
 
 @Serializable
@@ -101,10 +99,25 @@ data class DelayStep(
 @SerialName("key")
 data class KeyPressStep(
     override val id: String = UUID.randomUUID().toString(),
-    override val label: String = "System Key",
+    override val label: String = "Key Press",
     override val enabled: Boolean = true,
-    val keyAction: SystemKeyAction = SystemKeyAction.BACK
-) : MacroStep
+    val keyAction: SystemKeyAction = SystemKeyAction.BACK,
+    val customKeyCode: Int? = null,
+    val keyLabel: String = "",
+    val holdMs: Long = 35L,
+    val metaState: Int = 0
+) : MacroStep {
+    fun resolvedKeyCode(): Int = customKeyCode ?: keyAction.keyCode
+
+    fun resolvedKeyLabel(): String = when {
+        keyLabel.isNotBlank() -> keyLabel
+        customKeyCode != null -> KeyboardKeyCatalog.labelForKeyCode(customKeyCode)
+        else -> keyAction.displayLabel
+    }
+
+    fun formattedBinding(): String =
+        "${KeyboardKeyCatalog.formatMetaPrefix(metaState)}${resolvedKeyLabel()}"
+}
 
 @Serializable
 @SerialName("set_var")
@@ -215,7 +228,7 @@ data class MacroDefinition(
     val targetAppLabel: String = "Any Screen",
     val loopCount: Int = 1,
     val pollingIntervalMs: Long = 250L,
-    val injectionMode: InputInjectionMode = InputInjectionMode.MOUSE,
+    val injectionMode: InputInjectionMode = InputInjectionMode.TOUCHSCREEN,
     val touchGuardPolicy: TouchGuardPolicy = TouchGuardPolicy.OFF,
     val steps: List<MacroStep> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),

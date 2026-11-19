@@ -8,10 +8,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.PointerType
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.AppDatabase
@@ -22,6 +20,8 @@ import com.example.model.BranchAction
 import com.example.model.IfImageStep
 import com.example.model.IfVariableStep
 import com.example.model.InputInjectionMode
+import com.example.model.KeyPressStep
+import com.example.model.KeyboardKeyCatalog
 import com.example.model.LoopEndStep
 import com.example.model.LoopStartStep
 import com.example.model.MacroDefinition
@@ -241,15 +241,28 @@ class ExampleRobolectricTest {
 
         val stylusMacro = MacroDefinition(
             id = "stylus-1",
-            name = "Game Stylus Flow",
+            name = "Game Keyboard & Touch Flow",
             injectionMode = InputInjectionMode.CO_TOUCH_MULTIPLEX,
-            touchGuardPolicy = TouchGuardPolicy.YIELD_350MS
+            touchGuardPolicy = TouchGuardPolicy.YIELD_350MS,
+            steps = listOf(
+                KeyPressStep(
+                    customKeyCode = KeyEvent.KEYCODE_Q,
+                    keyLabel = "Q",
+                    holdMs = 50L,
+                    metaState = KeyEvent.META_SHIFT_ON
+                )
+            )
         )
         repo.saveMacro(stylusMacro)
 
         val loaded = repo.getMacro("stylus-1")!!
         assertEquals(InputInjectionMode.CO_TOUCH_MULTIPLEX, loaded.injectionMode)
         assertEquals(TouchGuardPolicy.YIELD_350MS, loaded.touchGuardPolicy)
+        val loadedKeyStep = loaded.steps.first() as KeyPressStep
+        assertEquals(KeyEvent.KEYCODE_Q, loadedKeyStep.resolvedKeyCode())
+        assertEquals(50L, loadedKeyStep.holdMs)
+        assertEquals(KeyEvent.META_SHIFT_ON, loadedKeyStep.metaState)
+        assertEquals("Shift+Q", loadedKeyStep.formattedBinding())
 
         val legacyBundleJson = """
             {
@@ -267,7 +280,7 @@ class ExampleRobolectricTest {
         val count = repo.importMacrosFromJson(legacyBundleJson).getOrThrow()
         assertEquals(1, count)
         val importedLegacy = repo.macros.first().first { it.name == "Legacy Flow" }
-        assertEquals(InputInjectionMode.MOUSE, importedLegacy.injectionMode)
+        assertEquals(InputInjectionMode.TOUCHSCREEN, importedLegacy.injectionMode)
         assertEquals(TouchGuardPolicy.OFF, importedLegacy.touchGuardPolicy)
         db.close()
     }
@@ -388,11 +401,12 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun sandboxRouter_handlesHoverClickDuringActiveJoystickDrag() {
+    fun sandboxRouter_handlesKeyEventsDuringActiveJoystickDragWithoutCanceling() {
         var dragging = false
         var cancelCount = 0
-        var targetHits = 0
-        var lastTool = ""
+        var keyHits = 0
+        var coKeyWhileDraggingHits = 0
+        var lastKey = ""
 
         val router = SandboxMultiPointerRouter(
             onJoystickState = { isDragging, _, _, incCancel, _, _ ->
@@ -400,9 +414,13 @@ class ExampleRobolectricTest {
                 if (incCancel) cancelCount++
             },
             onCooperativeFingerUpdate = { _, _, _, _, _, _ -> },
-            onTargetEvent = { _, _, toolLabel, _, countHit, _ ->
-                lastTool = toolLabel
-                if (countHit) targetHits++
+            onTargetEvent = { _, _, _, _, _, _ -> },
+            onKeyEventReceived = { keyLabel, isDown, whileDragging ->
+                if (isDown) {
+                    keyHits++
+                    lastKey = keyLabel
+                    if (whileDragging) coKeyWhileDraggingHits++
+                }
             }
         )
 
@@ -412,29 +430,25 @@ class ExampleRobolectricTest {
         val coords0 = arrayOf(MotionEvent.PointerCoords().apply { x = 200f; y = 620f; pressure = 1f; size = 1f })
 
         val down = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 1, props0, coords0, 0, 0, 1f, 1f, 6, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
-        router.handleTouchEvent(down, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Hover Click")
+        router.handleTouchEvent(down, 0f, 0f, 0f, 0f, joystickRect, targetRect, "Touch")
         down.recycle()
 
-        router.handleComposeHoverOrButton(
-            type = PointerEventType.Press,
-            pointerType = PointerType.Mouse,
-            winPos = Offset(200f, 200f),
-            uptimeMs = 150L,
-            targetRectInWin = targetRect
-        )
-        // Same timestamp deduplication
-        router.handleComposeHoverOrButton(
-            type = PointerEventType.Press,
-            pointerType = PointerType.Mouse,
-            winPos = Offset(200f, 200f),
-            uptimeMs = 150L,
-            targetRectInWin = targetRect
-        )
+        val keyDown = KeyEvent(150L, 150L, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SPACE, 0)
+        assertTrue(router.handleKeyEvent(keyDown, KeyEvent.KEYCODE_SPACE))
+        // Duplicate dispatch with same downTime + keyCode should be deduplicated
+        assertTrue(router.handleKeyEvent(keyDown, KeyEvent.KEYCODE_SPACE))
+        val keyUp = KeyEvent(150L, 185L, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SPACE, 0)
+        assertTrue(router.handleKeyEvent(keyUp, KeyEvent.KEYCODE_SPACE))
+
+        // Hardware volume key must always pass through unconsumed
+        val volUp = KeyEvent(200L, 200L, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_UP, 0)
+        assertFalse(router.handleKeyEvent(volUp, KeyEvent.KEYCODE_SPACE))
 
         assertTrue(dragging)
         assertEquals(0, cancelCount)
-        assertEquals(1, targetHits)
-        assertEquals("MOUSE_BTN", lastTool)
+        assertEquals(1, keyHits)
+        assertEquals(1, coKeyWhileDraggingHits)
+        assertEquals(KeyboardKeyCatalog.labelForKeyCode(KeyEvent.KEYCODE_SPACE), lastKey)
     }
 
     @Test
